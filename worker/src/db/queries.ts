@@ -1,6 +1,7 @@
 // HexGrid — D1 Query Helpers
 
 import type {
+  ActivityEvent,
   AgentApiKeyRow,
   AuthCodeRow,
   CreditsLedgerRow,
@@ -191,8 +192,9 @@ export async function insertHex(
       INSERT INTO hexes (
         hex_id, public_key, owner_email, agent_name, description,
         domain, capabilities, price_per_task, availability,
-        allowed_actions, reputation_score, total_tasks, active, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 50.0, 0, 1, ?)
+        allowed_actions, reputation_score, total_tasks, active, created_at,
+        mcp_endpoint, onboarded_via
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 50.0, 0, 1, ?, ?, ?)
     `)
     .bind(
       hex.hex_id,
@@ -206,6 +208,8 @@ export async function insertHex(
       hex.availability,
       hex.allowed_actions,
       hex.created_at,
+      hex.mcp_endpoint,
+      hex.onboarded_via,
     )
     .run()
 }
@@ -534,4 +538,141 @@ export async function getCreditsLedgerForAccount(
     .bind(accountId, limit)
     .all<CreditsLedgerRow>()
   return result.results
+}
+
+// ─── RATE LIMITING ───────────────────────────────────────────────────────
+
+export async function checkRateLimit(
+  db: D1Database,
+  key: string,
+  windowSeconds: number,
+  maxCount: number,
+): Promise<{ allowed: boolean; remaining: number }> {
+  const now = Math.floor(Date.now() / 1000)
+  const windowStart = now - (now % windowSeconds)
+
+  const row = await db
+    .prepare('SELECT count FROM rate_limits WHERE key = ? AND window_start = ?')
+    .bind(key, windowStart)
+    .first<{ count: number }>()
+
+  const current = row?.count ?? 0
+  if (current >= maxCount) {
+    return { allowed: false, remaining: 0 }
+  }
+
+  await db
+    .prepare(`
+      INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1)
+      ON CONFLICT(key, window_start) DO UPDATE SET count = count + 1
+    `)
+    .bind(key, windowStart)
+    .run()
+
+  return { allowed: true, remaining: maxCount - current - 1 }
+}
+
+export async function cleanupRateLimits(db: D1Database, olderThan: number): Promise<void> {
+  await db
+    .prepare('DELETE FROM rate_limits WHERE window_start < ?')
+    .bind(olderThan)
+    .run()
+}
+
+// ─── ACTIVITY FEED ───────────────────────────────────────────────────────
+
+export async function getRecentActivity(db: D1Database, limit = 20): Promise<ActivityEvent[]> {
+  const result = await db
+    .prepare(`
+      SELECT
+        'registration' AS type,
+        h.agent_name,
+        h.domain,
+        h.hex_id,
+        h.created_at AS timestamp,
+        '{}' AS metadata
+      FROM hexes h
+      WHERE h.active = 1
+
+      UNION ALL
+
+      SELECT
+        'task_completed' AS type,
+        provider.agent_name,
+        provider.domain,
+        provider.hex_id,
+        i.created_at AS timestamp,
+        json_object('rating', i.rating, 'credits', i.credits_transferred) AS metadata
+      FROM interactions i
+      JOIN hexes provider ON provider.hex_id = i.provider_hex
+
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `)
+    .bind(limit)
+    .all<{
+      type: string
+      agent_name: string
+      domain: string
+      hex_id: string
+      timestamp: number
+      metadata: string
+    }>()
+
+  return result.results.map(r => ({
+    type: r.type as ActivityEvent['type'],
+    agent_name: r.agent_name,
+    domain: r.domain as ActivityEvent['domain'],
+    hex_id: r.hex_id,
+    timestamp: r.timestamp,
+    metadata: JSON.parse(r.metadata),
+  }))
+}
+
+// ─── ENHANCED STATS ──────────────────────────────────────────────────────
+
+export async function getEnhancedStats(db: D1Database): Promise<{
+  total_agents: number
+  total_tasks: number
+  avg_reputation: number
+  by_domain: Record<string, number>
+  credits_24h: number
+  tasks_24h: number
+}> {
+  const hexes = await getAllHexes(db)
+  const byDomain = hexes.reduce<Record<string, number>>((acc, h) => {
+    acc[h.domain] = (acc[h.domain] ?? 0) + 1
+    return acc
+  }, {})
+
+  const oneDayAgo = Math.floor(Date.now() / 1000) - 86400
+
+  const credits24h = await db
+    .prepare(`
+      SELECT COALESCE(SUM(credits_transferred), 0) AS total
+      FROM interactions
+      WHERE created_at > ?
+    `)
+    .bind(oneDayAgo)
+    .first<{ total: number }>()
+
+  const tasks24h = await db
+    .prepare(`
+      SELECT COUNT(*) AS total
+      FROM tasks
+      WHERE created_at > ?
+    `)
+    .bind(oneDayAgo)
+    .first<{ total: number }>()
+
+  return {
+    total_agents: hexes.length,
+    total_tasks: hexes.reduce((sum, h) => sum + h.total_tasks, 0),
+    avg_reputation: hexes.length
+      ? Math.round(hexes.reduce((sum, h) => sum + h.reputation_score, 0) / hexes.length * 10) / 10
+      : 0,
+    by_domain: byDomain,
+    credits_24h: credits24h?.total ?? 0,
+    tasks_24h: tasks24h?.total ?? 0,
+  }
 }

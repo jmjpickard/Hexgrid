@@ -41,6 +41,8 @@ export async function registerHex(
   input: RegisterHexInput,
   env: Env
 ): Promise<RegisterHexOutput> {
+  const appBase = (env.APP_URL ?? 'https://hexgrid.app').replace(/\/+$/, '')
+  const workerBase = (env.WORKER_PUBLIC_URL ?? 'https://api.hexgrid.app').replace(/\/+$/, '')
 
   // ── Validate ───────────────────────────────────────────────────────────────
   if (!isValidDomain(input.domain)) {
@@ -89,6 +91,8 @@ export async function registerHex(
     availability: JSON.stringify(input.availability),
     allowed_actions: JSON.stringify(input.allowed_actions ?? ['read', 'analyse', 'respond']),
     created_at: now,
+    mcp_endpoint: null,
+    onboarded_via: 'web',
   })
 
   await ensureCreditsAccount(env.DB, input.owner_email)
@@ -97,7 +101,7 @@ export async function registerHex(
   const mcpConfig = JSON.stringify({
     mcpServers: {
       hexgrid: {
-        url: 'https://mcp.hexgrid.xyz/mcp',
+        url: `${workerBase}/mcp`,
         headers: {
           Authorization: 'Bearer hgk_live_REPLACE_WITH_AGENT_KEY',
         },
@@ -109,6 +113,6 @@ export async function registerHex(
     hex_id: hexId,
     neighbours,
     mcp_config: mcpConfig,
-    explorer_url: `https://hexgrid.xyz/?hex=${hexId}`,
+    explorer_url: `${appBase}/?hex=${hexId}`,
   }
 }

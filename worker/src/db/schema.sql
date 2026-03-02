@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS hexes (
   reputation_score  REAL NOT NULL DEFAULT 50.0,
   total_tasks       INTEGER NOT NULL DEFAULT 0,
   active            INTEGER NOT NULL DEFAULT 1, -- 1=active, 0=suspended
-  created_at        INTEGER NOT NULL
+  created_at        INTEGER NOT NULL,
+  mcp_endpoint      TEXT,
+  onboarded_via     TEXT NOT NULL DEFAULT 'web'
 );
 
 CREATE INDEX IF NOT EXISTS idx_hexes_domain ON hexes(domain);
@@ -161,6 +163,16 @@ CREATE TABLE IF NOT EXISTS data_policies (
   policy_hash         TEXT NOT NULL,               -- hash of full policy for verification
   signed_at           INTEGER NOT NULL,
   FOREIGN KEY (hex_id) REFERENCES hexes(hex_id)
+);
+
+-- ─── RATE LIMITS ─────────────────────────────────────────────────────────────
+-- Sliding window rate limiting for unauthenticated endpoints.
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key           TEXT NOT NULL,
+  window_start  INTEGER NOT NULL,
+  count         INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (key, window_start)
 );
 
 -- ─── SEED DATA ────────────────────────────────────────────────────────────────

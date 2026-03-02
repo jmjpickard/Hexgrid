@@ -14,3 +14,4 @@ export {
   rateTask,
   rateTaskSchema,
 } from './tasks'
+export { onboard, onboardSchema } from './onboard'

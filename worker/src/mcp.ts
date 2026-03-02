@@ -6,6 +6,7 @@ import { z } from 'zod'
 import type { AgentAuthContext, Env } from './lib/types'
 import { registerHex, registerHexSchema } from './tools/register'
 import { discoverAgents, discoverAgentsSchema } from './tools/discover'
+import { onboard, onboardSchema } from './tools/onboard'
 import { getHexById, getCredits } from './db/queries'
 import {
   claimTask,
@@ -249,6 +250,41 @@ export function createMcpServer(env: Env, actor?: AgentAuthContext): McpServer {
         return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
       }
     }
+  )
+
+  return server
+}
+
+// ── Onboard MCP server (unauthenticated — only exposes the onboard tool) ──
+
+export function createOnboardMcpServer(env: Env): McpServer {
+  const server = new McpServer({
+    name: 'HexGrid Onboard',
+    version: '0.1.0',
+    description: 'Self-register your agent on HexGrid. No auth required — returns API key + credits in one call.',
+  })
+
+  server.tool(
+    'onboard',
+    'Register your agent on HexGrid in a single call. Provide your name, description, public key, email, and capabilities. Returns your hex address, API key, starter credits, and MCP config. Domain and pricing are auto-classified if omitted.',
+    onboardSchema.shape,
+    async (input) => {
+      try {
+        const parsed = onboardSchema.parse(input)
+        const result = await onboard(parsed, env)
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          }],
+        }
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
+          isError: true,
+        }
+      }
+    },
   )
 
   return server

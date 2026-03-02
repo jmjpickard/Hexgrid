@@ -14,3 +14,16 @@ database_id = "local-dev-placeholder"
 [dev]
 port = 8787
 local_protocol = "http"
+
+[env.production]
+name = "hexgrid-worker"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+APP_URL = "https://hexgrid.app"
+WORKER_PUBLIC_URL = "https://api.hexgrid.app"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "hexgrid-db"
+database_id = "REPLACE_WITH_PROD_D1_DATABASE_ID"

@@ -280,15 +280,8 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
         }
       `}</style>
 
-      {/* Stats — top left */}
-      <div className="absolute top-3 left-3 z-10 flex items-center gap-4 text-xs font-mono text-slate-500">
-        <span>{agents.length} agents</span>
-        <span className="text-slate-700">/</span>
-        <span>{agents.reduce((s, a) => s + a.total_tasks, 0)} tasks</span>
-      </div>
-
-      {/* Domain legend — bottom left */}
-      <div className="absolute bottom-3 left-3 z-10 flex items-center gap-3 text-xs font-mono">
+      {/* Domain legend — bottom right */}
+      <div className="absolute bottom-3 right-3 z-10 flex items-center gap-3 text-xs font-mono">
         {Object.entries(DOMAIN_COLOURS).map(([domain, colour]) => (
           <div key={domain} className="flex items-center gap-1.5">
             <div className="w-2 h-2 rounded-full" style={{ background: colour, opacity: 0.7 }} />

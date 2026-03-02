@@ -30,8 +30,12 @@ import {
   revokeSessionByTokenHash,
   touchAgentApiKeyLastUsed,
   upsertAuthCode,
+  checkRateLimit,
+  cleanupRateLimits,
+  getRecentActivity,
+  getEnhancedStats,
 } from './db/queries'
-import { createMcpServer } from './mcp'
+import { createMcpServer, createOnboardMcpServer } from './mcp'
 import { DOMAIN_COLOURS } from './lib/h3'
 import type { Domain, Env, HexRow, SessionUser } from './lib/types'
 import {
@@ -629,25 +633,56 @@ export default {
       }
     }
 
-    // GET /api/stats — network stats for homepage
+    // GET /api/stats — enhanced network stats
     if (url.pathname === '/api/stats' && request.method === 'GET') {
       try {
-        const hexes = await getAllHexes(env.DB)
-        const byDomain = hexes.reduce<Record<string, number>>((acc, h) => {
-          acc[h.domain] = (acc[h.domain] ?? 0) + 1
-          return acc
-        }, {})
-
-        return Response.json({
-          total_agents: hexes.length,
-          total_tasks: hexes.reduce((sum, h) => sum + h.total_tasks, 0),
-          avg_reputation: hexes.length
-            ? Math.round(hexes.reduce((sum, h) => sum + h.reputation_score, 0) / hexes.length * 10) / 10
-            : 0,
-          by_domain: byDomain,
-        }, { headers: corsHeaders })
+        const stats = await getEnhancedStats(env.DB)
+        return Response.json(stats, { headers: corsHeaders })
       } catch (err) {
         return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
+      }
+    }
+
+    // GET /api/activity — recent network events
+    if (url.pathname === '/api/activity' && request.method === 'GET') {
+      try {
+        const limit = Math.min(Number(url.searchParams.get('limit') ?? '20'), 50)
+        const events = await getRecentActivity(env.DB, limit)
+        return Response.json({ events }, { headers: corsHeaders })
+      } catch (err) {
+        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
+      }
+    }
+
+    // ── MCP onboard (unauthenticated, rate-limited) ──────────────────────────
+    if (url.pathname === '/mcp/onboard' && request.method === 'POST') {
+      const ip = request.headers.get('CF-Connecting-IP') ?? request.headers.get('X-Forwarded-For') ?? 'unknown'
+      const rateLimitKey = `onboard:${ip}`
+
+      try {
+        const { allowed, remaining } = await checkRateLimit(env.DB, rateLimitKey, 3600, 5)
+        if (!allowed) {
+          return jsonResponse(
+            { error: 'Rate limit exceeded. Max 5 onboard attempts per hour.' },
+            429,
+            { 'X-RateLimit-Remaining': String(remaining) },
+          )
+        }
+
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          enableJsonResponse: true,
+          sessionIdGenerator: undefined,
+        })
+        const server = createOnboardMcpServer(env)
+        await server.connect(transport)
+
+        // Opportunistic cleanup of stale rate limit rows
+        const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200
+        cleanupRateLimits(env.DB, twoHoursAgo).catch(() => {})
+
+        return transport.handleRequest(request)
+      } catch (err) {
+        return jsonResponse({ error: errorMessage(err) }, 500)
       }
     }
 

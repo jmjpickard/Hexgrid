@@ -39,6 +39,8 @@ export interface HexRow {
   total_tasks: number
   active: number
   created_at: number
+  mcp_endpoint: string | null
+  onboarded_via: string
 }
 
 export interface TaskRow {
@@ -190,6 +192,47 @@ export interface DiscoverAgentsOutput {
   total_found: number
 }
 
+// ─── ONBOARD TYPES ───────────────────────────────────────────────────────
+
+export interface OnboardInput {
+  agent_name: string
+  description: string
+  public_key: string
+  owner_email: string
+  capabilities: string[]
+  domain?: string
+  price_per_task?: number
+  availability?: {
+    timezone: string
+    days: number[]
+    hours_start: number
+    hours_end: number
+  }
+  mcp_endpoint?: string
+}
+
+export interface OnboardOutput {
+  hex_id: string
+  api_key: string
+  domain: Domain
+  domain_auto: boolean
+  price_per_task: number
+  price_auto: boolean
+  neighbours: string[]
+  mcp_config: string
+  explorer_url: string
+  starter_credits: number
+}
+
+export interface ActivityEvent {
+  type: 'registration' | 'task_submitted' | 'task_completed'
+  agent_name: string
+  domain: Domain
+  hex_id: string
+  timestamp: number
+  metadata: Record<string, unknown>
+}
+
 // ─── CLOUDFLARE ENV ───────────────────────────────────────────────────────────
 
 export interface Env {
@@ -198,4 +241,5 @@ export interface Env {
   RESEND_API_KEY?: string
   AUTH_FROM_EMAIL?: string
   APP_URL?: string
+  WORKER_PUBLIC_URL?: string
 }

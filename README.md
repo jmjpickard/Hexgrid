@@ -163,3 +163,30 @@ Issue agent keys from `/api/agents/:hexId/keys`, then use:
   }
 }
 ```
+
+## GitHub Actions deploy
+
+Workflow file:
+
+- [`.github/workflows/deploy-cloudflare.yml`](/Users/jackpickard/Documents/repos/hexgrid/.github/workflows/deploy-cloudflare.yml)
+
+Trigger:
+
+- push to `main`
+- manual run via `workflow_dispatch`
+
+Required GitHub repository secrets:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Required GitHub repository variable:
+
+- `NEXT_PUBLIC_WORKER_URL_PROD` (example: `https://hexgrid-worker.your-subdomain.workers.dev`)
+- `CF_PAGES_PROJECT_NAME` (optional, defaults to `hexgrid-web`)
+- `CF_D1_DATABASE_ID_PROD` (recommended as variable; can also be a secret with same name)
+
+Keep the placeholder in [wrangler.toml](/Users/jackpickard/Documents/repos/hexgrid/wrangler.toml):
+
+- `REPLACE_WITH_PROD_D1_DATABASE_ID` under `[env.production]`
+- CI injects real value during deploy from `CF_D1_DATABASE_ID_PROD`
