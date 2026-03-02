@@ -1,0 +1,5 @@
+{
+  "name": "hexgrid",
+  "private": true,
+  "workspaces": ["worker", "web"]
+}
