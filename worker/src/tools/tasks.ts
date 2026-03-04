@@ -19,6 +19,8 @@ import {
   listQueuedTasksForHex,
   refreshProviderStats,
   setInteractionRating,
+  updateConnectionRating,
+  upsertConnection,
 } from '../db/queries'
 
 const PLATFORM_ACCOUNT_ID = 'platform:hexgrid'
@@ -258,6 +260,7 @@ export async function completeTask(
     created_at: now,
   }
   await insertInteraction(env.DB, interaction)
+  await upsertConnection(env.DB, task.from_hex, task.to_hex, now)
 
   await insertCreditsLedgerEntry(env.DB, {
     entry_id: crypto.randomUUID(),
@@ -321,6 +324,7 @@ export async function rateTask(
   const updated = await setInteractionRating(env.DB, task.task_id, input.rating)
   if (!updated) throw new Error('Task has already been rated')
 
+  await updateConnectionRating(env.DB, task.from_hex, task.to_hex, input.rating)
   await refreshProviderStats(env.DB, interaction.provider_hex)
   const provider = await getHexById(env.DB, interaction.provider_hex)
   if (!provider) throw new Error('Provider not found')

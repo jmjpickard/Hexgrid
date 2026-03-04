@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as d3 from 'd3'
+import { fetchConnections, type Connection } from '@/lib/api'
 
 interface Agent {
   hex_id: string
@@ -62,27 +63,32 @@ function hexPath(size: number): string {
 export default function HexMap({ onSelectAgent }: HexMapProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [agents, setAgents] = useState<Agent[]>([])
+  const [connections, setConnections] = useState<Connection[]>([])
   const [loading, setLoading] = useState(true)
 
-  const fetchAgents = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_WORKER_URL}/api/hexes`)
-      if (res.ok) {
-        const data: Agent[] = await res.json()
+      const [agentsRes, conns] = await Promise.all([
+        fetch(`${process.env.NEXT_PUBLIC_WORKER_URL}/api/hexes`),
+        fetchConnections(),
+      ])
+      if (agentsRes.ok) {
+        const data: Agent[] = await agentsRes.json()
         setAgents(data)
       }
+      setConnections(conns)
     } catch (e) {
-      console.error('Failed to fetch agents', e)
+      console.error('Failed to fetch data', e)
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    fetchAgents()
-    const interval = setInterval(fetchAgents, 30000)
+    fetchData()
+    const interval = setInterval(fetchData, 30000)
     return () => clearInterval(interval)
-  }, [fetchAgents])
+  }, [fetchData])
 
   useEffect(() => {
     if (!svgRef.current) return
@@ -147,6 +153,46 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
       .attr('fill', EMPTY_FILL)
       .attr('stroke', EMPTY_STROKE)
       .attr('stroke-width', 0.5)
+
+    // Build hex_id → grid position lookup for connection lines
+    const hexPositionMap = new Map<string, { x: number; y: number }>()
+    agents.forEach((agent, i) => {
+      if (i < sortedGrid.length) {
+        const cell = sortedGrid[i]
+        hexPositionMap.set(agent.hex_id, { x: cell.x, y: cell.y })
+      }
+    })
+
+    // Draw connection lines (behind hexes)
+    if (connections.length > 0) {
+      const connectionLines = connections.filter(
+        c => hexPositionMap.has(c.from_hex) && hexPositionMap.has(c.to_hex)
+      )
+
+      g.selectAll('.connection-line')
+        .data(connectionLines)
+        .enter()
+        .append('path')
+        .attr('class', 'connection-line')
+        .attr('d', c => {
+          const from = hexPositionMap.get(c.from_hex)!
+          const to = hexPositionMap.get(c.to_hex)!
+          const mx = (from.x + to.x) / 2
+          const my = (from.y + to.y) / 2
+          const dx = to.x - from.x
+          const dy = to.y - from.y
+          const len = Math.hypot(dx, dy) || 1
+          const offset = Math.min(len * 0.15, 20)
+          const cx = mx + (-dy / len) * offset
+          const cy = my + (dx / len) * offset
+          return `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`
+        })
+        .attr('fill', 'none')
+        .attr('stroke', 'rgba(148, 163, 184, 0.4)')
+        .attr('stroke-width', c => Math.max(0.5, Math.min(3, c.strength * 0.5)))
+        .attr('stroke-opacity', c => c.strength < 1 ? 0.2 : c.strength > 5 ? 0.6 : 0.15 + c.strength * 0.09)
+        .attr('stroke-linecap', 'round')
+    }
 
     // Draw occupied hexes
     const occupiedData = grid
@@ -245,7 +291,7 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
       svg.call(zoom.transform, d3.zoomIdentity.translate(offsetX, offsetY))
     }
 
-  }, [agents, onSelectAgent])
+  }, [agents, connections, onSelectAgent])
 
   if (loading) {
     return (

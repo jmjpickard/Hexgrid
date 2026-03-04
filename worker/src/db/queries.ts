@@ -4,6 +4,8 @@ import type {
   ActivityEvent,
   AgentApiKeyRow,
   AuthCodeRow,
+  ConnectionInsightRow,
+  ConnectionRow,
   CreditsLedgerRow,
   CreditsRow,
   Domain,
@@ -627,6 +629,97 @@ export async function getRecentActivity(db: D1Database, limit = 20): Promise<Act
     timestamp: r.timestamp,
     metadata: JSON.parse(r.metadata),
   }))
+}
+
+// ─── CONNECTIONS ─────────────────────────────────────────────────────────
+
+export async function upsertConnection(
+  db: D1Database,
+  fromHex: string,
+  toHex: string,
+  now: number,
+): Promise<void> {
+  await db
+    .prepare(`
+      INSERT INTO connections (from_hex, to_hex, interaction_count, total_rating_sum, rating_count, strength, first_interaction_at, last_interaction_at)
+      VALUES (?, ?, 1, 0, 0, 0.6, ?, ?)
+      ON CONFLICT(from_hex, to_hex) DO UPDATE SET
+        interaction_count = interaction_count + 1,
+        last_interaction_at = excluded.last_interaction_at,
+        strength = (interaction_count + 1) * (CASE WHEN rating_count > 0 THEN (total_rating_sum / rating_count) / 5.0 ELSE 0.6 END)
+    `)
+    .bind(fromHex, toHex, now, now)
+    .run()
+}
+
+export async function updateConnectionRating(
+  db: D1Database,
+  fromHex: string,
+  toHex: string,
+  rating: number,
+): Promise<void> {
+  await db
+    .prepare(`
+      UPDATE connections
+      SET
+        total_rating_sum = total_rating_sum + ?,
+        rating_count = rating_count + 1,
+        strength = interaction_count * ((total_rating_sum + ?) / (rating_count + 1) / 5.0)
+      WHERE from_hex = ? AND to_hex = ?
+    `)
+    .bind(rating, rating, fromHex, toHex)
+    .run()
+}
+
+export async function getConnectionsForHex(
+  db: D1Database,
+  hexId: string,
+): Promise<ConnectionRow[]> {
+  const result = await db
+    .prepare(`
+      SELECT * FROM connections
+      WHERE from_hex = ? OR to_hex = ?
+      ORDER BY strength DESC
+    `)
+    .bind(hexId, hexId)
+    .all<ConnectionRow>()
+  return result.results
+}
+
+export async function getAllConnections(db: D1Database): Promise<ConnectionRow[]> {
+  const result = await db
+    .prepare('SELECT * FROM connections WHERE strength > 0 ORDER BY strength DESC')
+    .all<ConnectionRow>()
+  return result.results
+}
+
+export async function getConnectionBetween(
+  db: D1Database,
+  fromHex: string,
+  toHex: string,
+): Promise<ConnectionRow | null> {
+  const result = await db
+    .prepare('SELECT * FROM connections WHERE from_hex = ? AND to_hex = ?')
+    .bind(fromHex, toHex)
+    .first<ConnectionRow>()
+  return result ?? null
+}
+
+export async function getInsightsForHex(
+  db: D1Database,
+  hexId: string,
+  limit = 50,
+): Promise<ConnectionInsightRow[]> {
+  const result = await db
+    .prepare(`
+      SELECT * FROM connection_insights
+      WHERE to_hex = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `)
+    .bind(hexId, limit)
+    .all<ConnectionInsightRow>()
+  return result.results
 }
 
 // ─── ENHANCED STATS ──────────────────────────────────────────────────────

@@ -140,6 +140,30 @@ export interface AgentAuthContext {
   scopes: string[]
 }
 
+export type InsightType = 'skill_learned' | 'approach_shared' | 'pattern_discovered'
+
+export interface ConnectionRow {
+  from_hex: string
+  to_hex: string
+  interaction_count: number
+  total_rating_sum: number
+  rating_count: number
+  strength: number
+  first_interaction_at: number
+  last_interaction_at: number
+}
+
+export interface ConnectionInsightRow {
+  id: number
+  from_hex: string
+  to_hex: string
+  connection_strength_at_time: number
+  insight_type: InsightType
+  content: string
+  domain: string
+  created_at: number
+}
+
 // ─── MCP TOOL INPUTS ──────────────────────────────────────────────────────────
 
 export interface RegisterHexInput {

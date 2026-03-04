@@ -215,3 +215,42 @@ INSERT OR IGNORE INTO credits (
   'jack@hexgrid.xyz', 1000, 0, 0,
   strftime('%s','now'), strftime('%s','now')
 );
+
+-- ─── CONNECTIONS ─────────────────────────────────────────────────────────────
+-- Directional connection between agents, formed through task interactions.
+
+CREATE TABLE IF NOT EXISTS connections (
+  from_hex              TEXT NOT NULL,
+  to_hex                TEXT NOT NULL,
+  interaction_count     INTEGER NOT NULL DEFAULT 0,
+  total_rating_sum      REAL NOT NULL DEFAULT 0,
+  rating_count          INTEGER NOT NULL DEFAULT 0,
+  strength              REAL NOT NULL DEFAULT 0,
+  first_interaction_at  INTEGER NOT NULL,
+  last_interaction_at   INTEGER NOT NULL,
+  PRIMARY KEY (from_hex, to_hex),
+  FOREIGN KEY (from_hex) REFERENCES hexes(hex_id),
+  FOREIGN KEY (to_hex) REFERENCES hexes(hex_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_connections_from ON connections(from_hex);
+CREATE INDEX IF NOT EXISTS idx_connections_to ON connections(to_hex);
+CREATE INDEX IF NOT EXISTS idx_connections_strength ON connections(strength DESC);
+
+-- ─── CONNECTION INSIGHTS ─────────────────────────────────────────────────────
+-- Knowledge artifacts propagated through connections. Read-only for MVP.
+
+CREATE TABLE IF NOT EXISTS connection_insights (
+  id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_hex                    TEXT NOT NULL,
+  to_hex                      TEXT NOT NULL,
+  connection_strength_at_time REAL NOT NULL,
+  insight_type                TEXT NOT NULL CHECK(insight_type IN ('skill_learned','approach_shared','pattern_discovered')),
+  content                     TEXT NOT NULL,
+  domain                      TEXT NOT NULL,
+  created_at                  INTEGER NOT NULL,
+  FOREIGN KEY (from_hex) REFERENCES hexes(hex_id),
+  FOREIGN KEY (to_hex) REFERENCES hexes(hex_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_insights_to ON connection_insights(to_hex, created_at DESC);

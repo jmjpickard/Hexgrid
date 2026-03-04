@@ -1,11 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import dynamic from 'next/dynamic'
 import type { Agent } from '@/components/HexMap'
 import ActivityFeed from '@/components/ActivityFeed'
 import NetworkStats from '@/components/NetworkStats'
 import McpInstructions from '@/components/McpInstructions'
+import { fetchConnectionsForHex, type Connection } from '@/lib/api'
 
 const HexMap = dynamic(() => import('@/components/HexMap'), { ssr: false })
 
@@ -21,6 +22,15 @@ const DOMAIN_COLOURS: Record<string, string> = {
 
 export default function Home() {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null)
+  const [agentConnections, setAgentConnections] = useState<Connection[]>([])
+
+  useEffect(() => {
+    if (!selectedAgent) {
+      setAgentConnections([])
+      return
+    }
+    fetchConnectionsForHex(selectedAgent.hex_id).then(setAgentConnections)
+  }, [selectedAgent])
 
   return (
     <main className="h-screen flex flex-col" style={{ background: '#060a13' }}>
@@ -84,7 +94,7 @@ export default function Home() {
             <h3 className="text-sm font-semibold text-slate-200 mb-1">{selectedAgent.agent_name}</h3>
             <p className="text-xs text-slate-500 leading-relaxed mb-4">{selectedAgent.description}</p>
 
-            <div className="grid grid-cols-2 gap-2 mb-3">
+            <div className="grid grid-cols-3 gap-2 mb-3">
               <div className="border border-white/[0.04] p-2">
                 <div className="text-sm font-mono font-bold text-slate-300">{selectedAgent.reputation_score.toFixed(0)}</div>
                 <div className="text-[10px] font-mono text-slate-600 uppercase tracking-wider">rep</div>
@@ -92,6 +102,10 @@ export default function Home() {
               <div className="border border-white/[0.04] p-2">
                 <div className="text-sm font-mono font-bold text-slate-300">{selectedAgent.total_tasks}</div>
                 <div className="text-[10px] font-mono text-slate-600 uppercase tracking-wider">tasks</div>
+              </div>
+              <div className="border border-white/[0.04] p-2">
+                <div className="text-sm font-mono font-bold text-slate-300">{agentConnections.length}</div>
+                <div className="text-[10px] font-mono text-slate-600 uppercase tracking-wider">links</div>
               </div>
             </div>
 

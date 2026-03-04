@@ -7,7 +7,13 @@ import type { AgentAuthContext, Env } from './lib/types'
 import { registerHex, registerHexSchema } from './tools/register'
 import { discoverAgents, discoverAgentsSchema } from './tools/discover'
 import { onboard, onboardSchema } from './tools/onboard'
-import { getHexById, getCredits } from './db/queries'
+import {
+  getAllConnections,
+  getConnectionsForHex,
+  getCredits,
+  getHexById,
+  getInsightsForHex,
+} from './db/queries'
 import {
   claimTask,
   claimTaskSchema,
@@ -250,6 +256,71 @@ export function createMcpServer(env: Env, actor?: AgentAuthContext): McpServer {
         return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
       }
     }
+  )
+
+  // ── get_connections ──────────────────────────────────────────────────────
+  server.tool(
+    'get_connections',
+    'Get connection graph for this agent. Shows all agents you have interacted with, ordered by connection strength.',
+    {},
+    async () => {
+      try {
+        const authed = requireActor()
+        const connections = await getConnectionsForHex(env.DB, authed.hex_id)
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ hex_id: authed.hex_id, connections, total: connections.length }, null, 2),
+          }],
+        }
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
+      }
+    },
+  )
+
+  // ── get_network_graph ───────────────────────────────────────────────────
+  server.tool(
+    'get_network_graph',
+    'Get the full network connection graph. Optionally filter by minimum connection strength.',
+    { min_strength: z.number().min(0).optional() },
+    async ({ min_strength }) => {
+      try {
+        const connections = await getAllConnections(env.DB)
+        const filtered = min_strength
+          ? connections.filter(c => c.strength >= min_strength)
+          : connections
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ connections: filtered, total: filtered.length }, null, 2),
+          }],
+        }
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
+      }
+    },
+  )
+
+  // ── get_insights ────────────────────────────────────────────────────────
+  server.tool(
+    'get_insights',
+    'Get knowledge insights gained through agent connections. These are skills, approaches, and patterns discovered from interactions.',
+    { limit: z.number().int().min(1).max(100).optional() },
+    async ({ limit }) => {
+      try {
+        const authed = requireActor()
+        const insights = await getInsightsForHex(env.DB, authed.hex_id, limit ?? 50)
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ hex_id: authed.hex_id, insights, total: insights.length }, null, 2),
+          }],
+        }
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
+      }
+    },
   )
 
   return server

@@ -32,6 +32,8 @@ import {
   upsertAuthCode,
   checkRateLimit,
   cleanupRateLimits,
+  getAllConnections,
+  getConnectionsForHex,
   getRecentActivity,
   getEnhancedStats,
 } from './db/queries'
@@ -649,6 +651,27 @@ export default {
         const limit = Math.min(Number(url.searchParams.get('limit') ?? '20'), 50)
         const events = await getRecentActivity(env.DB, limit)
         return Response.json({ events }, { headers: corsHeaders })
+      } catch (err) {
+        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
+      }
+    }
+
+    // GET /api/connections — all connections (for spectator map)
+    if (url.pathname === '/api/connections' && request.method === 'GET') {
+      try {
+        const connections = await getAllConnections(env.DB)
+        return Response.json(connections, { headers: corsHeaders })
+      } catch (err) {
+        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
+      }
+    }
+
+    // GET /api/connections/:hexId — connections for one agent
+    if (url.pathname.startsWith('/api/connections/') && request.method === 'GET') {
+      const hexId = url.pathname.replace('/api/connections/', '')
+      try {
+        const connections = await getConnectionsForHex(env.DB, hexId)
+        return Response.json(connections, { headers: corsHeaders })
       } catch (err) {
         return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
       }

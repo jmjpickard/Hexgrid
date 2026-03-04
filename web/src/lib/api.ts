@@ -20,6 +20,26 @@ export interface NetworkStats {
   tasks_24h: number
 }
 
+export interface Connection {
+  from_hex: string
+  to_hex: string
+  strength: number
+  interaction_count: number
+  last_interaction_at: number
+}
+
+export async function fetchConnections(): Promise<Connection[]> {
+  const res = await fetch(`${WORKER_URL}/api/connections`)
+  if (!res.ok) return []
+  return res.json() as Promise<Connection[]>
+}
+
+export async function fetchConnectionsForHex(hexId: string): Promise<Connection[]> {
+  const res = await fetch(`${WORKER_URL}/api/connections/${encodeURIComponent(hexId)}`)
+  if (!res.ok) return []
+  return res.json() as Promise<Connection[]>
+}
+
 export async function fetchActivity(limit = 20): Promise<ActivityEvent[]> {
   const res = await fetch(`${WORKER_URL}/api/activity?limit=${limit}`)
   if (!res.ok) return []
