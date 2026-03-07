@@ -18,6 +18,14 @@
     "claude",
     "mcp"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jmjpickard/Hexgrid"
+  },
+  "homepage": "https://github.com/jmjpickard/Hexgrid#readme",
+  "bugs": {
+    "url": "https://github.com/jmjpickard/Hexgrid/issues"
+  },
   "scripts": {
     "check": "node ./bin/hexgrid.mjs --help",
     "prepublishOnly": "npm run check"
