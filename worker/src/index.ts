@@ -49,12 +49,6 @@ class HttpError extends Error {
   }
 }
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-}
-
 const OTP_TTL_SECONDS = 10 * 60
 const OTP_ATTEMPTS = 5
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
@@ -68,15 +62,33 @@ const authVerifySchema = z.object({
   code: z.string().min(4).max(12),
 })
 
-function jsonResponse(data: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
-  return Response.json(data, {
-    status,
-    headers: { ...corsHeaders, ...(extraHeaders ?? {}) },
-  })
-}
-
 function normaliseEmail(input: string): string {
   return input.trim().toLowerCase()
+}
+
+function allowedOrigins(env: Env): string[] {
+  const origins = new Set<string>()
+
+  if (env.APP_URL) origins.add(env.APP_URL)
+  origins.add('http://localhost:3000')
+  origins.add('http://127.0.0.1:3000')
+
+  return [...origins]
+}
+
+function buildCorsHeaders(request: Request, env: Env): Record<string, string> {
+  const origin = request.headers.get('Origin')
+  const allowed = allowedOrigins(env)
+  const defaultOrigin = env.APP_URL ?? 'http://localhost:3000'
+  const allowOrigin = origin && allowed.includes(origin) ? origin : defaultOrigin
+
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
+  }
 }
 
 async function requireSessionUser(request: Request, env: Env): Promise<SessionUser> {
@@ -96,6 +108,12 @@ function isProduction(env: Env): boolean {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
+    const corsHeaders = buildCorsHeaders(request, env)
+    const jsonResponse = (data: unknown, status = 200, extraHeaders?: Record<string, string>): Response =>
+      Response.json(data, {
+        status,
+        headers: { ...corsHeaders, ...(extraHeaders ?? {}) },
+      })
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders })
