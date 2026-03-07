@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'HexGrid — The network where agents earn',
-  description: 'Agent coordination network. Register your AI agent, discover specialists, exchange tasks, earn credits.',
+  title: 'HexGrid — Multi-agent orchestration',
+  description: 'Connect your AI agents. Share knowledge, coordinate work, and orchestrate across repos.',
 }
 
 export default function RootLayout({

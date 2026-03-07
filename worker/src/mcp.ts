@@ -1,360 +1,170 @@
-// HexGrid — MCP Server
-// Any MCP-compatible agent connects here with one config line.
+// HexGrid — MCP Server (Orchestration Platform)
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { z } from 'zod'
-import type { AgentAuthContext, Env } from './lib/types'
-import { registerHex, registerHexSchema } from './tools/register'
-import { discoverAgents, discoverAgentsSchema } from './tools/discover'
-import { onboard, onboardSchema } from './tools/onboard'
+import type { AccountAuthContext, Env } from './lib/types'
 import {
-  getAllConnections,
-  getConnectionsForHex,
-  getCredits,
-  getHexById,
-  getInsightsForHex,
-} from './db/queries'
-import {
-  claimTask,
-  claimTaskSchema,
-  completeTask,
-  completeTaskSchema,
-  pollTasks,
-  pollTasksSchema,
-  rateTask,
-  rateTaskSchema,
-  submitTask,
-  submitTaskSchema,
-} from './tools/tasks'
+  connectSession, connectSessionSchema,
+  heartbeat, heartbeatSchema,
+  listSessions, listSessionsSchema,
+  disconnect, disconnectSchema,
+  writeKnowledge, writeKnowledgeSchema,
+  searchKnowledge, searchKnowledgeSchema,
+  askAgent, askAgentSchema,
+  checkMessages, checkMessagesSchema,
+  respond, respondSchema,
+  getResponse, getResponseSchema,
+} from './tools'
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-export function createMcpServer(env: Env, actor?: AgentAuthContext): McpServer {
-  const server = new McpServer({
-    name: 'HexGrid',
-    version: '0.1.0',
-    description: 'The agent coordination network. Register your agent, earn credits, find specialist agents.',
-  })
-
-  function requireActor(): AgentAuthContext {
-    if (!actor) {
-      throw new Error('Unauthenticated agent request')
-    }
-    return actor
-  }
-
-  // ── register_hex ───────────────────────────────────────────────────────────
-  server.tool(
-    'register_hex',
-    'Register your agent on the HexGrid network. Assigns a hex address, enables discovery by other agents, and allows you to earn credits for completed tasks. Your private key never leaves your machine — only provide your public key here.',
-    registerHexSchema.shape,
-    async (input) => {
-      try {
-        const parsed = registerHexSchema.parse(input)
-        const result = await registerHex(parsed, env)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify(result, null, 2),
-          }]
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
-    }
-  )
-
-  // ── discover_agents ────────────────────────────────────────────────────────
-  server.tool(
-    'discover_agents',
-    'Find specialist agents on the HexGrid network. Returns top agents for a given domain, ordered by reputation score and availability.',
-    discoverAgentsSchema.shape,
-    async (input) => {
-      try {
-        const authed = requireActor()
-        if (!authed.scopes.includes('discover')) {
-          throw new Error('Missing required scope: discover')
-        }
-        const parsed = discoverAgentsSchema.parse(input)
-        const result = await discoverAgents(parsed, env)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify(result, null, 2),
-          }]
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
-    }
-  )
-
-  // ── submit_task ─────────────────────────────────────────────────────────────
-  server.tool(
-    'submit_task',
-    'Submit a task from this agent to another provider agent. Credits are escrowed immediately.',
-    submitTaskSchema.shape,
-    async (input) => {
-      try {
-        const parsed = submitTaskSchema.parse(input)
-        const result = await submitTask(parsed, env, requireActor())
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
-    },
-  )
-
-  // ── poll_tasks ──────────────────────────────────────────────────────────────
-  server.tool(
-    'poll_tasks',
-    'Poll queued tasks assigned to this provider agent.',
-    pollTasksSchema.shape,
-    async (input) => {
-      try {
-        const parsed = pollTasksSchema.parse(input)
-        const result = await pollTasks(parsed, env, requireActor())
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
-    },
-  )
-
-  // ── claim_task ──────────────────────────────────────────────────────────────
-  server.tool(
-    'claim_task',
-    'Claim a queued task assigned to this agent.',
-    claimTaskSchema.shape,
-    async (input) => {
-      try {
-        const parsed = claimTaskSchema.parse(input)
-        const result = await claimTask(parsed, env, requireActor())
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
-    },
-  )
-
-  // ── complete_task ───────────────────────────────────────────────────────────
-  server.tool(
-    'complete_task',
-    'Complete an active task and release escrowed credits.',
-    completeTaskSchema.shape,
-    async (input) => {
-      try {
-        const parsed = completeTaskSchema.parse(input)
-        const result = await completeTask(parsed, env, requireActor())
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
-    },
-  )
-
-  // ── rate_task ───────────────────────────────────────────────────────────────
-  server.tool(
-    'rate_task',
-    'Rate a completed task as the requesting agent (1-5).',
-    rateTaskSchema.shape,
-    async (input) => {
-      try {
-        const parsed = rateTaskSchema.parse(input)
-        const result = await rateTask(parsed, env, requireActor())
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
-    },
-  )
-
-  // ── get_reputation ─────────────────────────────────────────────────────────
-  server.tool(
-    'get_reputation',
-    'Get the reputation score and stats for any hex on the network.',
-    { hex_id: z.string() },
-    async ({ hex_id }) => {
-      try {
-        const hex = await getHexById(env.DB, hex_id)
-        if (!hex) {
-          return { content: [{ type: 'text' as const, text: 'Hex not found' }], isError: true }
-        }
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              hex_id: hex.hex_id,
-              agent_name: hex.agent_name,
-              domain: hex.domain,
-              reputation_score: hex.reputation_score,
-              total_tasks: hex.total_tasks,
-              price_per_task: hex.price_per_task,
-              description: hex.description,
-            }, null, 2)
-          }]
-        }
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
-      }
-    }
-  )
-
-  // ── check_balance ──────────────────────────────────────────────────────────
-  server.tool(
-    'check_balance',
-    'Check the credit balance for this agent owner account.',
-    {},
-    async () => {
-      try {
-        const authed = requireActor()
-        const hex = await getHexById(env.DB, authed.hex_id)
-        if (!hex) {
-          throw new Error('Authenticated agent not found')
-        }
-        const credits = await getCredits(env.DB, hex.owner_email)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify(credits ?? { balance: 0, total_earned: 0, total_spent: 0 }, null, 2)
-          }]
-        }
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
-      }
-    }
-  )
-
-  // ── get_connections ──────────────────────────────────────────────────────
-  server.tool(
-    'get_connections',
-    'Get connection graph for this agent. Shows all agents you have interacted with, ordered by connection strength.',
-    {},
-    async () => {
-      try {
-        const authed = requireActor()
-        const connections = await getConnectionsForHex(env.DB, authed.hex_id)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ hex_id: authed.hex_id, connections, total: connections.length }, null, 2),
-          }],
-        }
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
-      }
-    },
-  )
-
-  // ── get_network_graph ───────────────────────────────────────────────────
-  server.tool(
-    'get_network_graph',
-    'Get the full network connection graph. Optionally filter by minimum connection strength.',
-    { min_strength: z.number().min(0).optional() },
-    async ({ min_strength }) => {
-      try {
-        const connections = await getAllConnections(env.DB)
-        const filtered = min_strength
-          ? connections.filter(c => c.strength >= min_strength)
-          : connections
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ connections: filtered, total: filtered.length }, null, 2),
-          }],
-        }
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
-      }
-    },
-  )
-
-  // ── get_insights ────────────────────────────────────────────────────────
-  server.tool(
-    'get_insights',
-    'Get knowledge insights gained through agent connections. These are skills, approaches, and patterns discovered from interactions.',
-    { limit: z.number().int().min(1).max(100).optional() },
-    async ({ limit }) => {
-      try {
-        const authed = requireActor()
-        const insights = await getInsightsForHex(env.DB, authed.hex_id, limit ?? 50)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ hex_id: authed.hex_id, insights, total: insights.length }, null, 2),
-          }],
-        }
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }], isError: true }
-      }
-    },
-  )
-
-  return server
+type ToolResult = {
+  content: Array<{ type: 'text'; text: string }>
+  isError?: boolean
 }
 
-// ── Onboard MCP server (unauthenticated — only exposes the onboard tool) ──
+function ok(data: unknown): ToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+}
 
-export function createOnboardMcpServer(env: Env): McpServer {
+function fail(err: unknown): ToolResult {
+  return { content: [{ type: 'text', text: `Error: ${errorMessage(err)}` }], isError: true }
+}
+
+export function createMcpServer(env: Env, account: AccountAuthContext): McpServer {
   const server = new McpServer({
-    name: 'HexGrid Onboard',
-    version: '0.1.0',
-    description: 'Self-register your agent on HexGrid. No auth required — returns API key + credits in one call.',
+    name: 'HexGrid',
+    version: '0.2.0',
+    description: 'Multi-agent orchestration platform. Connect your agents, share knowledge, coordinate work.',
   })
 
+  // ── connect_session ─────────────────────────────────────────────────────────
   server.tool(
-    'onboard',
-    'Register your agent on HexGrid in a single call. Provide your name, description, public key, email, and capabilities. Returns your hex address, API key, starter credits, and MCP config. Domain and pricing are auto-classified if omitted.',
-    onboardSchema.shape,
+    'connect_session',
+    'Connect this agent session to HexGrid. Call once on startup. Returns your session ID and a list of other active sessions on your account.',
+    connectSessionSchema.shape,
     async (input) => {
       try {
-        const parsed = onboardSchema.parse(input)
-        const result = await onboard(parsed, env)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify(result, null, 2),
-          }],
-        }
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${errorMessage(err)}` }],
-          isError: true,
-        }
-      }
+        const parsed = connectSessionSchema.parse(input)
+        return ok(await connectSession(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── heartbeat ───────────────────────────────────────────────────────────────
+  server.tool(
+    'heartbeat',
+    'Send a heartbeat to keep this session alive. Call every 5 minutes. Returns count of pending messages.',
+    heartbeatSchema.shape,
+    async (input) => {
+      try {
+        const parsed = heartbeatSchema.parse(input)
+        return ok(await heartbeat(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── list_sessions ───────────────────────────────────────────────────────────
+  server.tool(
+    'list_sessions',
+    'List all active agent sessions on your account. See which other agents are currently connected.',
+    listSessionsSchema.shape,
+    async () => {
+      try {
+        return ok(await listSessions(env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── disconnect ──────────────────────────────────────────────────────────────
+  server.tool(
+    'disconnect',
+    'Disconnect this agent session from HexGrid. Call when shutting down.',
+    disconnectSchema.shape,
+    async (input) => {
+      try {
+        const parsed = disconnectSchema.parse(input)
+        return ok(await disconnect(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── write_knowledge ─────────────────────────────────────────────────────────
+  server.tool(
+    'write_knowledge',
+    'Write a knowledge entry to the shared store. All sessions on your account can search it. Use this to share insights about your repo, architecture decisions, or useful context.',
+    writeKnowledgeSchema.shape,
+    async (input) => {
+      try {
+        const parsed = writeKnowledgeSchema.parse(input)
+        return ok(await writeKnowledge(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── search_knowledge ────────────────────────────────────────────────────────
+  server.tool(
+    'search_knowledge',
+    'Search the shared knowledge store. Find insights written by any session on your account. Filter by query text or tags.',
+    searchKnowledgeSchema.shape,
+    async (input) => {
+      try {
+        const parsed = searchKnowledgeSchema.parse(input)
+        return ok(await searchKnowledge(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── ask_agent ───────────────────────────────────────────────────────────────
+  server.tool(
+    'ask_agent',
+    'Send a question to another active session. The target agent will see it when they call check_messages. Returns a message_id you can use with get_response to check for the answer.',
+    askAgentSchema.shape,
+    async (input) => {
+      try {
+        const parsed = askAgentSchema.parse(input)
+        return ok(await askAgent(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── check_messages ──────────────────────────────────────────────────────────
+  server.tool(
+    'check_messages',
+    'Check for pending questions addressed to this session. Call periodically or when another session may need help.',
+    checkMessagesSchema.shape,
+    async (input) => {
+      try {
+        const parsed = checkMessagesSchema.parse(input)
+        return ok(await checkMessages(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── respond ─────────────────────────────────────────────────────────────────
+  server.tool(
+    'respond',
+    'Answer a pending question. The asking agent will see your response when they call get_response.',
+    respondSchema.shape,
+    async (input) => {
+      try {
+        const parsed = respondSchema.parse(input)
+        return ok(await respond(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── get_response ────────────────────────────────────────────────────────────
+  server.tool(
+    'get_response',
+    'Check if a question you asked has been answered. Returns the answer if available, or the current status (pending/expired).',
+    getResponseSchema.shape,
+    async (input) => {
+      try {
+        const parsed = getResponseSchema.parse(input)
+        return ok(await getResponse(parsed, env, account))
+      } catch (err) { return fail(err) }
     },
   )
 

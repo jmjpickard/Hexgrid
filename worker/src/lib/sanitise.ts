@@ -101,26 +101,9 @@ export function sanitiseCapabilities(caps: string[]): string[] {
     .filter(c => c.length > 0)
 }
 
-// Validate domain
-export function isValidDomain(domain: string): domain is Domain {
-  return ['coding', 'data', 'legal', 'finance', 'marketing', 'writing', 'other'].includes(domain)
-}
-
 // Validate email (basic)
 export function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length < 200
-}
-
-// Validate availability object
-export function isValidAvailability(av: unknown): boolean {
-  if (!av || typeof av !== 'object') return false
-  const a = av as Record<string, unknown>
-  if (typeof a.timezone !== 'string') return false
-  if (!Array.isArray(a.days)) return false
-  if (a.days.some((d: unknown) => typeof d !== 'number' || d < 0 || d > 6)) return false
-  if (typeof a.hours_start !== 'number' || a.hours_start < 0 || a.hours_start > 23) return false
-  if (typeof a.hours_end !== 'number' || a.hours_end < 0 || a.hours_end > 23) return false
-  return true
 }
 
 // SHA-256 hash (Web Crypto API — available in Workers)
@@ -131,8 +114,5 @@ async function sha256(text: string): Promise<string> {
   const hashArray = Array.from(new Uint8Array(hashBuffer))
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
 }
-
-// Need to import Domain type for the type guard
-import type { Domain } from './types'
 
 export { sha256 }

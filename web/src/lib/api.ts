@@ -1,54 +1,136 @@
-// HexGrid — API fetch helpers
+// HexGrid — API fetch helpers (Orchestration Platform)
 
 const WORKER_URL = process.env.NEXT_PUBLIC_WORKER_URL ?? ''
 
-export interface ActivityEvent {
-  type: 'registration' | 'task_submitted' | 'task_completed'
-  agent_name: string
-  domain: string
+export interface AgentSession {
+  session_id: string
+  account_id: string
+  name: string
+  repo_url: string | null
+  description: string | null
+  capabilities: string
   hex_id: string
-  timestamp: number
-  metadata: Record<string, unknown>
+  status: 'active' | 'disconnected'
+  last_heartbeat: number
+  connected_at: number
+  disconnected_at: number | null
 }
 
-export interface NetworkStats {
-  total_agents: number
-  total_tasks: number
-  avg_reputation: number
-  by_domain: Record<string, number>
-  credits_24h: number
-  tasks_24h: number
+export interface KnowledgeEntry {
+  id: string
+  account_id: string
+  session_id: string
+  topic: string
+  content: string
+  tags: string[]
+  session_name: string
+  created_at: number
+  updated_at: number
 }
 
 export interface Connection {
-  from_hex: string
-  to_hex: string
-  strength: number
+  id: string
+  account_id: string
+  session_a_id: string
+  session_b_id: string
   interaction_count: number
-  last_interaction_at: number
+  strength: number
+  last_interaction: number
+}
+
+export interface MessageEntry {
+  id: string
+  from_session_id: string
+  to_session_id: string
+  from_session_name: string
+  to_session_name: string
+  question: string
+  answer: string | null
+  status: 'pending' | 'answered' | 'expired'
+  created_at: number
+  answered_at: number | null
+}
+
+export interface AccountStats {
+  active_sessions: number
+  total_knowledge: number
+  total_messages: number
+  total_connections: number
+}
+
+async function authFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${WORKER_URL}${path}`, {
+    ...init,
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+  })
+}
+
+export async function fetchMe(): Promise<{ user_id: string; email: string } | null> {
+  const res = await authFetch('/api/me')
+  if (!res.ok) return null
+  return res.json() as Promise<{ user_id: string; email: string }>
+}
+
+export async function fetchSessions(): Promise<AgentSession[]> {
+  const res = await authFetch('/api/sessions')
+  if (!res.ok) return []
+  const data = await res.json() as { sessions: AgentSession[] }
+  return data.sessions
+}
+
+export async function fetchKnowledge(limit = 50): Promise<KnowledgeEntry[]> {
+  const res = await authFetch(`/api/knowledge?limit=${limit}`)
+  if (!res.ok) return []
+  const data = await res.json() as { entries: KnowledgeEntry[] }
+  return data.entries
 }
 
 export async function fetchConnections(): Promise<Connection[]> {
-  const res = await fetch(`${WORKER_URL}/api/connections`)
+  const res = await authFetch('/api/connections')
   if (!res.ok) return []
-  return res.json() as Promise<Connection[]>
+  const data = await res.json() as { connections: Connection[] }
+  return data.connections
 }
 
-export async function fetchConnectionsForHex(hexId: string): Promise<Connection[]> {
-  const res = await fetch(`${WORKER_URL}/api/connections/${encodeURIComponent(hexId)}`)
+export async function fetchMessages(limit = 50): Promise<MessageEntry[]> {
+  const res = await authFetch(`/api/messages?limit=${limit}`)
   if (!res.ok) return []
-  return res.json() as Promise<Connection[]>
+  const data = await res.json() as { messages: MessageEntry[] }
+  return data.messages
 }
 
-export async function fetchActivity(limit = 20): Promise<ActivityEvent[]> {
-  const res = await fetch(`${WORKER_URL}/api/activity?limit=${limit}`)
-  if (!res.ok) return []
-  const data = await res.json() as { events: ActivityEvent[] }
-  return data.events
-}
-
-export async function fetchStats(): Promise<NetworkStats | null> {
-  const res = await fetch(`${WORKER_URL}/api/stats`)
+export async function fetchStats(): Promise<AccountStats | null> {
+  const res = await authFetch('/api/stats')
   if (!res.ok) return null
-  return res.json() as Promise<NetworkStats>
+  return res.json() as Promise<AccountStats>
+}
+
+export async function generateApiKey(): Promise<{ key: string; key_prefix: string } | null> {
+  const res = await authFetch('/api/account/api-key', { method: 'POST' })
+  if (!res.ok) return null
+  return res.json() as Promise<{ key: string; key_prefix: string }>
+}
+
+export async function startAuth(email: string): Promise<{ ok: boolean; dev_code?: string }> {
+  const res = await authFetch('/auth/start', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+  return res.json() as Promise<{ ok: boolean; dev_code?: string }>
+}
+
+export async function verifyAuth(email: string, code: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch('/auth/verify', {
+    method: 'POST',
+    body: JSON.stringify({ email, code }),
+  })
+  return res.json() as Promise<{ ok: boolean; error?: string }>
+}
+
+export async function logout(): Promise<void> {
+  await authFetch('/auth/logout', { method: 'POST' })
 }

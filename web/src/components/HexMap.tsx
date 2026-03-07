@@ -2,45 +2,23 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as d3 from 'd3'
-import { fetchConnections, type Connection } from '@/lib/api'
-
-interface Agent {
-  hex_id: string
-  agent_name: string
-  description: string
-  domain: string
-  reputation_score: number
-  total_tasks: number
-  price_per_task: number
-  colour: string
-  created_at: number
-}
+import { fetchSessions, fetchConnections, type AgentSession, type Connection } from '@/lib/api'
 
 interface HexMapProps {
-  onSelectAgent?: (agent: Agent | null) => void
+  onSelectSession?: (session: AgentSession | null) => void
 }
 
-const DOMAIN_COLOURS: Record<string, string> = {
-  coding:    '#3B82F6',
-  data:      '#8B5CF6',
-  legal:     '#EF4444',
-  finance:   '#10B981',
-  marketing: '#F59E0B',
-  writing:   '#EC4899',
-  other:     '#6B7280',
-}
-
+const ACTIVE_COLOUR = '#3B82F6'
+const DISCONNECTED_COLOUR = '#374151'
 const HEX_SIZE = 32
 const EMPTY_FILL = '#0a1020'
 const EMPTY_STROKE = 'rgba(148, 163, 184, 0.08)'
 const OCCUPIED_STROKE = 'rgba(148, 163, 184, 0.15)'
 
-// Pointy-top hex grid: each hex has exactly 6 neighbours
 function generateHexGrid(cols: number, rows: number, size: number) {
   const hexes: Array<{ q: number; r: number; x: number; y: number }> = []
   const w = Math.sqrt(3) * size
   const h = 1.5 * size
-
   for (let r = 0; r < rows; r++) {
     for (let q = 0; q < cols; q++) {
       const x = w * (q + 0.5 * (r & 1))
@@ -51,7 +29,6 @@ function generateHexGrid(cols: number, rows: number, size: number) {
   return hexes
 }
 
-// Pointy-top hex path (angle offset -30deg)
 function hexPath(size: number): string {
   const points = Array.from({ length: 6 }, (_, i) => {
     const angle = (Math.PI / 180) * (60 * i - 30)
@@ -60,22 +37,19 @@ function hexPath(size: number): string {
   return `M ${points.join(' L ')} Z`
 }
 
-export default function HexMap({ onSelectAgent }: HexMapProps) {
+export default function HexMap({ onSelectSession }: HexMapProps) {
   const svgRef = useRef<SVGSVGElement>(null)
-  const [agents, setAgents] = useState<Agent[]>([])
+  const [sessions, setSessions] = useState<AgentSession[]>([])
   const [connections, setConnections] = useState<Connection[]>([])
   const [loading, setLoading] = useState(true)
 
   const fetchData = useCallback(async () => {
     try {
-      const [agentsRes, conns] = await Promise.all([
-        fetch(`${process.env.NEXT_PUBLIC_WORKER_URL}/api/hexes`),
+      const [sessionsData, conns] = await Promise.all([
+        fetchSessions(),
         fetchConnections(),
       ])
-      if (agentsRes.ok) {
-        const data: Agent[] = await agentsRes.json()
-        setAgents(data)
-      }
+      setSessions(sessionsData)
       setConnections(conns)
     } catch (e) {
       console.error('Failed to fetch data', e)
@@ -104,7 +78,6 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
 
     svg.selectAll('*').remove()
 
-    // Subtle radial gradient for depth
     const defs = svg.append('defs')
     const radGrad = defs.append('radialGradient')
       .attr('id', 'bg-vignette')
@@ -112,7 +85,6 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
     radGrad.append('stop').attr('offset', '0%').attr('stop-color', '#0d1525').attr('stop-opacity', 1)
     radGrad.append('stop').attr('offset', '100%').attr('stop-color', '#060a13').attr('stop-opacity', 1)
 
-    // Background
     svg.append('rect')
       .attr('width', width)
       .attr('height', height)
@@ -123,26 +95,24 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
 
     const grid = generateHexGrid(cols, rows, HEX_SIZE)
 
-    // Assign agents to grid positions — cluster them near center
     const centerQ = Math.floor(cols / 2)
     const centerR = Math.floor(rows / 2)
 
-    // Sort grid cells by distance from center for better agent placement
     const sortedGrid = [...grid].sort((a, b) => {
       const distA = Math.hypot(a.q - centerQ, a.r - centerR)
       const distB = Math.hypot(b.q - centerQ, b.r - centerR)
       return distA - distB
     })
 
-    const agentMap = new Map<string, Agent>()
-    agents.forEach((agent, i) => {
+    const sessionMap = new Map<string, AgentSession>()
+    sessions.forEach((session, i) => {
       if (i < sortedGrid.length) {
         const cell = sortedGrid[i]
-        agentMap.set(`${cell.q},${cell.r}`, agent)
+        sessionMap.set(`${cell.q},${cell.r}`, session)
       }
     })
 
-    // Draw empty hexes — subtle grid lines only
+    // Empty hexes
     g.selectAll('.hex-empty')
       .data(grid)
       .enter()
@@ -154,19 +124,19 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
       .attr('stroke', EMPTY_STROKE)
       .attr('stroke-width', 0.5)
 
-    // Build hex_id → grid position lookup for connection lines
-    const hexPositionMap = new Map<string, { x: number; y: number }>()
-    agents.forEach((agent, i) => {
+    // Session position lookup for connection lines
+    const sessionPositionMap = new Map<string, { x: number; y: number }>()
+    sessions.forEach((session, i) => {
       if (i < sortedGrid.length) {
         const cell = sortedGrid[i]
-        hexPositionMap.set(agent.hex_id, { x: cell.x, y: cell.y })
+        sessionPositionMap.set(session.session_id, { x: cell.x, y: cell.y })
       }
     })
 
-    // Draw connection lines (behind hexes)
+    // Connection lines
     if (connections.length > 0) {
       const connectionLines = connections.filter(
-        c => hexPositionMap.has(c.from_hex) && hexPositionMap.has(c.to_hex)
+        c => sessionPositionMap.has(c.session_a_id) && sessionPositionMap.has(c.session_b_id)
       )
 
       g.selectAll('.connection-line')
@@ -175,8 +145,8 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
         .append('path')
         .attr('class', 'connection-line')
         .attr('d', c => {
-          const from = hexPositionMap.get(c.from_hex)!
-          const to = hexPositionMap.get(c.to_hex)!
+          const from = sessionPositionMap.get(c.session_a_id)!
+          const to = sessionPositionMap.get(c.session_b_id)!
           const mx = (from.x + to.x) / 2
           const my = (from.y + to.y) / 2
           const dx = to.x - from.x
@@ -188,32 +158,31 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
           return `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`
         })
         .attr('fill', 'none')
-        .attr('stroke', 'rgba(148, 163, 184, 0.4)')
+        .attr('stroke', 'rgba(59, 130, 246, 0.4)')
         .attr('stroke-width', c => Math.max(0.5, Math.min(3, c.strength * 0.5)))
         .attr('stroke-opacity', c => c.strength < 1 ? 0.2 : c.strength > 5 ? 0.6 : 0.15 + c.strength * 0.09)
         .attr('stroke-linecap', 'round')
     }
 
-    // Draw occupied hexes
+    // Occupied hexes
     const occupiedData = grid
-      .map(cell => ({ ...cell, agent: agentMap.get(`${cell.q},${cell.r}`) }))
-      .filter((d): d is typeof d & { agent: Agent } => d.agent !== undefined)
+      .map(cell => ({ ...cell, session: sessionMap.get(`${cell.q},${cell.r}`) }))
+      .filter((d): d is typeof d & { session: AgentSession } => d.session !== undefined)
 
-    // Glow filter for occupied hexes
     const glowFilter = defs.append('filter').attr('id', 'hex-glow')
     glowFilter.append('feGaussianBlur').attr('stdDeviation', '3').attr('result', 'blur')
     glowFilter.append('feComposite').attr('in', 'SourceGraphic').attr('in2', 'blur').attr('operator', 'over')
 
-    const hexGroups = g.selectAll('.hex-agent')
+    const hexGroups = g.selectAll('.hex-session')
       .data(occupiedData)
       .enter()
       .append('g')
-      .attr('class', 'hex-agent')
+      .attr('class', 'hex-session')
       .attr('transform', d => `translate(${d.x}, ${d.y})`)
       .style('cursor', 'pointer')
       .on('click', (_event, d) => {
-        onSelectAgent?.(d.agent)
-        g.selectAll('.hex-agent .hex-fill').attr('stroke', OCCUPIED_STROKE).attr('stroke-width', 1)
+        onSelectSession?.(d.session)
+        g.selectAll('.hex-session .hex-fill').attr('stroke', OCCUPIED_STROKE).attr('stroke-width', 1)
         const target = _event.currentTarget as SVGGElement
         d3.select(target).select('.hex-fill')
           .attr('stroke', '#e2e8f0')
@@ -221,22 +190,23 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
       })
       .on('mouseenter', (_event, d) => {
         const target = _event.currentTarget as SVGGElement
-        const colour = d3.color(DOMAIN_COLOURS[d.agent.domain] ?? '#6B7280')
+        const baseColour = d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR
+        const colour = d3.color(baseColour)
         d3.select(target).select('.hex-fill')
-          .attr('fill', colour ? colour.brighter(0.5).toString() : '#6B7280')
+          .attr('fill', colour ? colour.brighter(0.5).toString() : baseColour)
       })
       .on('mouseleave', (_event, d) => {
         const target = _event.currentTarget as SVGGElement
         d3.select(target).select('.hex-fill')
-          .attr('fill', DOMAIN_COLOURS[d.agent.domain] ?? '#6B7280')
-          .attr('fill-opacity', 0.7)
+          .attr('fill', d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
+          .attr('fill-opacity', d.session.status === 'active' ? 0.7 : 0.3)
       })
 
-    // Glow layer (behind the hex)
+    // Glow layer
     hexGroups.append('path')
       .attr('d', hexPath(HEX_SIZE + 4))
-      .attr('fill', d => DOMAIN_COLOURS[d.agent.domain] ?? '#6B7280')
-      .attr('fill-opacity', 0.12)
+      .attr('fill', d => d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
+      .attr('fill-opacity', d => d.session.status === 'active' ? 0.12 : 0.04)
       .attr('stroke', 'none')
       .attr('filter', 'url(#hex-glow)')
 
@@ -244,32 +214,31 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
     hexGroups.append('path')
       .attr('class', 'hex-fill')
       .attr('d', hexPath(HEX_SIZE - 1))
-      .attr('fill', d => DOMAIN_COLOURS[d.agent.domain] ?? '#6B7280')
-      .attr('fill-opacity', 0.7)
+      .attr('fill', d => d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
+      .attr('fill-opacity', d => d.session.status === 'active' ? 0.7 : 0.3)
       .attr('stroke', OCCUPIED_STROKE)
       .attr('stroke-width', 1)
       .style('transition', 'fill 0.15s ease, fill-opacity 0.15s ease')
 
-    // Agent name — short label
+    // Session name label
     hexGroups.append('text')
       .attr('text-anchor', 'middle')
       .attr('dominant-baseline', 'central')
       .attr('y', 1)
-      .attr('fill', 'rgba(255,255,255,0.9)')
+      .attr('fill', d => d.session.status === 'active' ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.4)')
       .attr('font-size', '10px')
       .attr('font-weight', '600')
       .attr('font-family', "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace")
       .attr('letter-spacing', '0.5px')
-      .text(d => d.agent.agent_name.slice(0, 3).toUpperCase())
+      .text(d => d.session.name.slice(0, 3).toUpperCase())
 
-    // Pulse for new agents (last 24h)
-    const oneDayAgo = Date.now() / 1000 - 86400
+    // Pulse for active sessions
     hexGroups
-      .filter(d => d.agent.created_at > oneDayAgo)
+      .filter(d => d.session.status === 'active')
       .append('path')
       .attr('d', hexPath(HEX_SIZE - 1))
       .attr('fill', 'none')
-      .attr('stroke', d => DOMAIN_COLOURS[d.agent.domain] ?? '#6B7280')
+      .attr('stroke', ACTIVE_COLOUR)
       .attr('stroke-width', 1.5)
       .attr('opacity', 0.5)
       .style('animation', 'hexPulse 3s ease-in-out infinite')
@@ -283,15 +252,14 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
 
     svg.call(zoom)
 
-    // If we have agents, center the view on them
-    if (agents.length > 0 && sortedGrid.length > 0) {
-      const firstAgent = sortedGrid[0]
-      const offsetX = width / 2 - firstAgent.x - HEX_SIZE
-      const offsetY = height / 2 - firstAgent.y - HEX_SIZE
+    if (sessions.length > 0 && sortedGrid.length > 0) {
+      const firstSession = sortedGrid[0]
+      const offsetX = width / 2 - firstSession.x - HEX_SIZE
+      const offsetY = height / 2 - firstSession.y - HEX_SIZE
       svg.call(zoom.transform, d3.zoomIdentity.translate(offsetX, offsetY))
     }
 
-  }, [agents, connections, onSelectAgent])
+  }, [sessions, connections, onSelectSession])
 
   if (loading) {
     return (
@@ -326,32 +294,29 @@ export default function HexMap({ onSelectAgent }: HexMapProps) {
         }
       `}</style>
 
-      {/* Domain legend — bottom right */}
+      {/* Status legend */}
       <div className="absolute bottom-3 right-3 z-10 flex items-center gap-3 text-xs font-mono">
-        {Object.entries(DOMAIN_COLOURS).map(([domain, colour]) => (
-          <div key={domain} className="flex items-center gap-1.5">
-            <div className="w-2 h-2 rounded-full" style={{ background: colour, opacity: 0.7 }} />
-            <span className="text-slate-600">{domain}</span>
-          </div>
-        ))}
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full" style={{ background: ACTIVE_COLOUR, opacity: 0.7 }} />
+          <span className="text-slate-600">active</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full" style={{ background: DISCONNECTED_COLOUR, opacity: 0.5 }} />
+          <span className="text-slate-600">disconnected</span>
+        </div>
       </div>
 
       {/* Empty state */}
-      {agents.length === 0 && (
+      {sessions.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div className="text-center">
-            <p className="text-slate-600 text-sm font-mono">No agents on the grid yet</p>
-            <p className="text-slate-700 text-xs font-mono mt-1">Be the first to claim a hex</p>
+            <p className="text-slate-600 text-sm font-mono">No active sessions</p>
+            <p className="text-slate-700 text-xs font-mono mt-1">Connect an agent to get started</p>
           </div>
         </div>
       )}
 
-      <svg
-        ref={svgRef}
-        className="w-full h-full"
-      />
+      <svg ref={svgRef} className="w-full h-full" />
     </div>
   )
 }
-
-export type { Agent }

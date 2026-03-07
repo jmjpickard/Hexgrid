@@ -1,98 +1,16 @@
-// HexGrid — Shared Types
+// HexGrid — Shared Types (Orchestration Platform)
 
-export type Domain =
-  | 'coding'
-  | 'data'
-  | 'legal'
-  | 'finance'
-  | 'marketing'
-  | 'writing'
-  | 'other'
-
-export const DOMAINS: readonly Domain[] = [
-  'coding', 'data', 'legal', 'finance', 'marketing', 'writing', 'other',
-] as const
-
-export type TaskStatus =
-  | 'queued'
-  | 'active'
-  | 'complete'
-  | 'disputed'
-  | 'refunded'
-
-export type Outcome = 'success' | 'failure' | 'disputed'
+export type SessionStatus = 'active' | 'disconnected'
+export type MessageStatus = 'pending' | 'answered' | 'expired'
 
 // ─── DATABASE ROWS ────────────────────────────────────────────────────────────
-
-export interface HexRow {
-  hex_id: string
-  public_key: string
-  owner_email: string
-  agent_name: string
-  description: string
-  domain: Domain
-  capabilities: string        // JSON string
-  price_per_task: number
-  availability: string        // JSON string
-  allowed_actions: string     // JSON string
-  reputation_score: number
-  total_tasks: number
-  active: number
-  created_at: number
-  mcp_endpoint: string | null
-  onboarded_via: string
-}
-
-export interface TaskRow {
-  task_id: string
-  from_hex: string
-  to_hex: string
-  description: string
-  description_hash: string
-  credits_escrowed: number
-  status: TaskStatus
-  created_at: number
-  claimed_at: number | null
-  completed_at: number | null
-  result_hash: string | null
-}
-
-export interface InteractionRow {
-  interaction_id: string
-  task_id: string
-  provider_hex: string
-  consumer_hex: string
-  outcome: Outcome
-  rating: number | null
-  credits_transferred: number
-  platform_fee: number
-  created_at: number
-}
-
-export interface CreditsRow {
-  account_id: string
-  balance: number
-  total_earned: number
-  total_spent: number
-  created_at: number
-  updated_at: number
-}
-
-export interface CreditsLedgerRow {
-  entry_id: string
-  account_id: string
-  delta: number
-  reason: string
-  task_id: string | null
-  metadata: string
-  created_at: number
-}
 
 export interface UserRow {
   user_id: string
   email: string
   email_verified_at: number | null
-  starter_credits_granted_at: number | null
+  account_api_key_hash: string | null
+  account_api_key_prefix: string | null
   created_at: number
 }
 
@@ -104,7 +22,7 @@ export interface AuthCodeRow {
   created_at: number
 }
 
-export interface SessionRow {
+export interface WebSessionRow {
   session_id: string
   user_id: string
   token_hash: string
@@ -113,148 +31,183 @@ export interface SessionRow {
   revoked_at: number | null
 }
 
-export interface AgentApiKeyRow {
-  key_id: string
-  user_id: string
-  hex_id: string
-  key_hash: string
-  key_prefix: string
+export interface AgentSessionRow {
+  session_id: string
+  account_id: string
   name: string
-  scopes: string
-  created_at: number
-  last_used_at: number | null
-  revoked_at: number | null
+  repo_url: string | null
+  description: string | null
+  capabilities: string // JSON array
+  hex_id: string
+  status: SessionStatus
+  last_heartbeat: number
+  connected_at: number
+  disconnected_at: number | null
 }
+
+export interface KnowledgeRow {
+  id: string
+  account_id: string
+  session_id: string
+  topic: string
+  content: string
+  tags: string // JSON array
+  created_at: number
+  updated_at: number
+}
+
+export interface MessageRow {
+  id: string
+  account_id: string
+  from_session_id: string
+  to_session_id: string
+  question: string
+  answer: string | null
+  status: MessageStatus
+  created_at: number
+  answered_at: number | null
+  expires_at: number
+}
+
+export interface ConnectionRow {
+  id: string
+  account_id: string
+  session_a_id: string
+  session_b_id: string
+  interaction_count: number
+  strength: number
+  last_interaction: number
+}
+
+// ─── AUTH CONTEXT ─────────────────────────────────────────────────────────────
 
 export interface SessionUser {
   user_id: string
   email: string
   email_verified_at: number | null
-  starter_credits_granted_at: number | null
 }
 
-export interface AgentAuthContext {
-  key_id: string
-  user_id: string
+export interface AccountAuthContext {
+  account_id: string
+}
+
+// ─── MCP TOOL I/O ─────────────────────────────────────────────────────────────
+
+export interface ConnectSessionInput {
+  name: string
+  repo_url?: string
+  description?: string
+  capabilities?: string[]
+}
+
+export interface ConnectSessionOutput {
+  session_id: string
   hex_id: string
-  scopes: string[]
+  active_sessions: Array<{
+    session_id: string
+    name: string
+    hex_id: string
+    status: SessionStatus
+  }>
 }
 
-export type InsightType = 'skill_learned' | 'approach_shared' | 'pattern_discovered'
-
-export interface ConnectionRow {
-  from_hex: string
-  to_hex: string
-  interaction_count: number
-  total_rating_sum: number
-  rating_count: number
-  strength: number
-  first_interaction_at: number
-  last_interaction_at: number
+export interface HeartbeatInput {
+  session_id: string
 }
 
-export interface ConnectionInsightRow {
-  id: number
-  from_hex: string
-  to_hex: string
-  connection_strength_at_time: number
-  insight_type: InsightType
+export interface HeartbeatOutput {
+  ok: boolean
+  pending_messages: number
+}
+
+export interface ListSessionsOutput {
+  sessions: Array<{
+    session_id: string
+    name: string
+    repo_url: string | null
+    description: string | null
+    hex_id: string
+    status: SessionStatus
+    connected_at: number
+  }>
+}
+
+export interface WriteKnowledgeInput {
+  session_id: string
+  topic: string
   content: string
-  domain: string
-  created_at: number
+  tags?: string[]
 }
 
-// ─── MCP TOOL INPUTS ──────────────────────────────────────────────────────────
-
-export interface RegisterHexInput {
-  public_key: string
-  domain: Domain
-  capabilities: string[]
-  price_per_task: number
-  availability: {
-    timezone: string
-    days: number[]          // 0=Sun ... 6=Sat
-    hours_start: number     // 0-23
-    hours_end: number       // 0-23
-  }
-  owner_email: string
-  agent_name: string
-  description: string
-  allowed_actions?: string[]
+export interface WriteKnowledgeOutput {
+  id: string
+  topic: string
 }
 
-export interface DiscoverAgentsInput {
-  domain: Domain
-  task_description: string
-  max_credits: number
-  requester_hex?: string
+export interface SearchKnowledgeInput {
+  query?: string
+  tags?: string[]
+  limit?: number
 }
 
-// ─── MCP TOOL OUTPUTS ─────────────────────────────────────────────────────────
-
-export interface RegisterHexOutput {
-  hex_id: string
-  neighbours: string[]
-  mcp_config: string      // JSON snippet
-  explorer_url: string
+export interface SearchKnowledgeOutput {
+  entries: Array<{
+    id: string
+    topic: string
+    content: string
+    tags: string[]
+    session_name: string
+    created_at: number
+  }>
+  total: number
 }
 
-export interface AgentSummary {
-  hex_id: string
-  agent_name: string
-  description: string
-  domain: Domain
-  reputation_score: number
-  total_tasks: number
-  price_per_task: number
-  capabilities: string[]
-  available_now: boolean
+export interface AskAgentInput {
+  session_id: string
+  to_session_id: string
+  question: string
 }
 
-export interface DiscoverAgentsOutput {
-  agents: AgentSummary[]
-  total_found: number
+export interface AskAgentOutput {
+  message_id: string
+  to_session_id: string
+  status: MessageStatus
 }
 
-// ─── ONBOARD TYPES ───────────────────────────────────────────────────────
-
-export interface OnboardInput {
-  agent_name: string
-  description: string
-  public_key: string
-  owner_email: string
-  capabilities: string[]
-  domain?: string
-  price_per_task?: number
-  availability?: {
-    timezone: string
-    days: number[]
-    hours_start: number
-    hours_end: number
-  }
-  mcp_endpoint?: string
+export interface CheckMessagesInput {
+  session_id: string
 }
 
-export interface OnboardOutput {
-  hex_id: string
-  api_key: string
-  domain: Domain
-  domain_auto: boolean
-  price_per_task: number
-  price_auto: boolean
-  neighbours: string[]
-  mcp_config: string
-  explorer_url: string
-  starter_credits: number
+export interface CheckMessagesOutput {
+  messages: Array<{
+    message_id: string
+    from_session_id: string
+    from_session_name: string
+    question: string
+    created_at: number
+  }>
+  total: number
 }
 
-export interface ActivityEvent {
-  type: 'registration' | 'task_submitted' | 'task_completed'
-  agent_name: string
-  domain: Domain
-  hex_id: string
-  timestamp: number
-  metadata: Record<string, unknown>
+export interface RespondInput {
+  session_id: string
+  message_id: string
+  answer: string
+}
+
+export interface RespondOutput {
+  message_id: string
+  status: MessageStatus
+}
+
+export interface GetResponseInput {
+  message_id: string
+}
+
+export interface GetResponseOutput {
+  message_id: string
+  status: MessageStatus
+  answer: string | null
 }
 
 // ─── CLOUDFLARE ENV ───────────────────────────────────────────────────────────

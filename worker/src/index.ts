@@ -1,45 +1,28 @@
-// HexGrid — Cloudflare Worker Entry Point
+// HexGrid — Cloudflare Worker Entry Point (Orchestration Platform)
 
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
-import { registerHex, registerHexSchema } from './tools/register'
-import { discoverAgents, discoverAgentsSchema } from './tools/discover'
 import {
-  createSession,
   createUser,
-  creditCredits,
+  createWebSession,
   decrementAuthCodeAttempts,
   deleteAuthCode,
-  ensureCreditsAccount,
-  getAgentApiKeyByHash,
-  getAllHexes,
+  getAccountStats,
   getAuthCodeByEmail,
-  getCredits,
-  getCreditsLedgerForAccount,
-  getHexById,
-  getHexesByOwnerEmail,
-  getOwnedHexById,
+  getConnectionsForAccount,
+  getRecentMessages,
   getSessionUserByTokenHash,
+  getUserByAccountApiKeyHash,
   getUserByEmail,
-  insertAgentApiKey,
-  insertCreditsLedgerEntry,
-  listAgentApiKeysForHex,
-  markStarterCreditsGranted,
+  listAllSessions,
+  listKnowledge,
   markUserEmailVerified,
-  revokeAgentApiKey,
   revokeSessionByTokenHash,
-  touchAgentApiKeyLastUsed,
+  setAccountApiKey,
   upsertAuthCode,
-  checkRateLimit,
-  cleanupRateLimits,
-  getAllConnections,
-  getConnectionsForHex,
-  getRecentActivity,
-  getEnhancedStats,
 } from './db/queries'
-import { createMcpServer, createOnboardMcpServer } from './mcp'
-import { DOMAIN_COLOURS } from './lib/h3'
-import type { Domain, Env, HexRow, SessionUser } from './lib/types'
+import { createMcpServer } from './mcp'
+import type { Env, SessionUser } from './lib/types'
 import {
   buildSessionClearCookie,
   buildSessionCookie,
@@ -53,18 +36,6 @@ import {
 } from './lib/auth'
 import { sendOtpEmail } from './lib/email'
 import { isValidEmail } from './lib/sanitise'
-import {
-  claimTask,
-  claimTaskSchema,
-  completeTask,
-  completeTaskSchema,
-  pollTasks,
-  pollTasksSchema,
-  rateTask,
-  rateTaskSchema,
-  submitTask,
-  submitTaskSchema,
-} from './tools/tasks'
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -84,18 +55,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 }
 
-const STARTER_CREDITS = 500
 const OTP_TTL_SECONDS = 10 * 60
 const OTP_ATTEMPTS = 5
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
-const DEFAULT_AGENT_SCOPES = [
-  'discover',
-  'submit_task',
-  'poll_tasks',
-  'claim_task',
-  'complete_task',
-  'rate_task',
-] as const
 
 const authStartSchema = z.object({
   email: z.string().min(3).max(200),
@@ -106,74 +68,11 @@ const authVerifySchema = z.object({
   code: z.string().min(4).max(12),
 })
 
-const createAgentSchema = registerHexSchema.omit({ owner_email: true })
-
-const createAgentKeySchema = z.object({
-  name: z.string().min(2).max(64).default('Default agent key').optional(),
-  scopes: z.array(z.enum(DEFAULT_AGENT_SCOPES)).min(1).max(DEFAULT_AGENT_SCOPES.length).optional(),
-})
-
-const submitTaskRestSchema = submitTaskSchema.extend({
-  from_hex: z.string().min(5).max(64),
-})
-
-const claimTaskRestSchema = claimTaskSchema.extend({
-  hex_id: z.string().min(5).max(64),
-})
-
-const completeTaskRestSchema = completeTaskSchema.extend({
-  hex_id: z.string().min(5).max(64),
-})
-
-const rateTaskRestSchema = rateTaskSchema.extend({
-  hex_id: z.string().min(5).max(64),
-})
-
 function jsonResponse(data: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
   return Response.json(data, {
     status,
-    headers: {
-      ...corsHeaders,
-      ...(extraHeaders ?? {}),
-    },
+    headers: { ...corsHeaders, ...(extraHeaders ?? {}) },
   })
-}
-
-function parseJsonField<T>(json: string, fallback: T): T {
-  try {
-    return JSON.parse(json) as T
-  } catch {
-    return fallback
-  }
-}
-
-function mapHexPublicSummary(hex: HexRow): Record<string, unknown> {
-  return {
-    hex_id: hex.hex_id,
-    agent_name: hex.agent_name,
-    description: hex.description,
-    domain: hex.domain,
-    reputation_score: hex.reputation_score,
-    total_tasks: hex.total_tasks,
-    price_per_task: hex.price_per_task,
-    colour: DOMAIN_COLOURS[hex.domain as Domain] ?? '#6B7280',
-    created_at: hex.created_at,
-  }
-}
-
-function mapHexPublicDetail(hex: HexRow): Record<string, unknown> {
-  return {
-    hex_id: hex.hex_id,
-    agent_name: hex.agent_name,
-    description: hex.description,
-    domain: hex.domain,
-    capabilities: parseJsonField<string[]>(hex.capabilities, []),
-    availability: parseJsonField<Record<string, unknown>>(hex.availability, {}),
-    reputation_score: hex.reputation_score,
-    total_tasks: hex.total_tasks,
-    price_per_task: hex.price_per_task,
-    created_at: hex.created_at,
-  }
 }
 
 function normaliseEmail(input: string): string {
@@ -190,12 +89,6 @@ async function requireSessionUser(request: Request, env: Env): Promise<SessionUs
   return user
 }
 
-async function requireOwnedHex(env: Env, user: SessionUser, hexId: string): Promise<HexRow> {
-  const hex = await getOwnedHexById(env.DB, hexId, user.email)
-  if (!hex) throw new HttpError(403, 'Agent not owned by this user')
-  return hex
-}
-
 function isProduction(env: Env): boolean {
   return env.ENVIRONMENT === 'production'
 }
@@ -210,10 +103,7 @@ export default {
 
     // ── Health check ──────────────────────────────────────────────────────────
     if (url.pathname === '/health') {
-      return Response.json(
-        { status: 'ok', service: 'hexgrid', version: '0.1.0' },
-        { headers: corsHeaders }
-      )
+      return jsonResponse({ status: 'ok', service: 'hexgrid', version: '0.2.0' })
     }
 
     // ── Auth endpoints ─────────────────────────────────────────────────────────
@@ -221,9 +111,7 @@ export default {
       try {
         const body = authStartSchema.parse(await request.json())
         const email = normaliseEmail(body.email)
-        if (!isValidEmail(email)) {
-          throw new HttpError(400, 'Invalid email')
-        }
+        if (!isValidEmail(email)) throw new HttpError(400, 'Invalid email')
 
         const now = nowUnix()
         let user = await getUserByEmail(env.DB, email)
@@ -232,7 +120,6 @@ export default {
           await createUser(env.DB, userId, email, now)
           user = await getUserByEmail(env.DB, email)
         }
-
         if (!user) throw new Error('Failed to create user')
 
         const code = generateOtpCode(6)
@@ -264,9 +151,9 @@ export default {
         const now = nowUnix()
 
         const authCode = await getAuthCodeByEmail(env.DB, email)
-        if (!authCode) throw new HttpError(400, 'No verification code found for this email')
+        if (!authCode) throw new HttpError(400, 'No verification code found')
         if (authCode.expires_at < now) throw new HttpError(400, 'Verification code expired')
-        if (authCode.attempts_left <= 0) throw new HttpError(429, 'Too many attempts. Request a new code.')
+        if (authCode.attempts_left <= 0) throw new HttpError(429, 'Too many attempts')
 
         const codeHash = await sha256(code)
         if (codeHash !== authCode.code_hash) {
@@ -285,42 +172,14 @@ export default {
         if (!user) throw new Error('Failed to create user')
 
         await markUserEmailVerified(env.DB, user.user_id, now)
-        await ensureCreditsAccount(env.DB, email)
-
-        if (!user.starter_credits_granted_at) {
-          await creditCredits(env.DB, email, STARTER_CREDITS, now)
-          await insertCreditsLedgerEntry(env.DB, {
-            entry_id: crypto.randomUUID(),
-            account_id: email,
-            delta: STARTER_CREDITS,
-            reason: 'signup_bonus',
-            task_id: null,
-            metadata: JSON.stringify({ source: 'starter_grant' }),
-            created_at: now,
-          })
-          await markStarterCreditsGranted(env.DB, user.user_id, now)
-        }
 
         const token = generateToken(32)
         const tokenHash = await sha256(token)
-        await createSession(
-          env.DB,
-          crypto.randomUUID(),
-          user.user_id,
-          tokenHash,
-          now + SESSION_TTL_SECONDS,
-          now,
-        )
+        await createWebSession(env.DB, crypto.randomUUID(), user.user_id, tokenHash, now + SESSION_TTL_SECONDS, now)
 
         const cookie = buildSessionCookie(token, isProduction(env), SESSION_TTL_SECONDS)
         return jsonResponse(
-          {
-            ok: true,
-            user: {
-              user_id: user.user_id,
-              email,
-            },
-          },
+          { ok: true, user: { user_id: user.user_id, email } },
           200,
           { 'Set-Cookie': cookie },
         )
@@ -344,368 +203,97 @@ export default {
       }
     }
 
-    // ── REST API for web frontend ─────────────────────────────────────────────
+    // ── REST API for web dashboard ──────────────────────────────────────────────
 
-    // GET /api/me — session profile
+    // GET /api/me
     if (url.pathname === '/api/me' && request.method === 'GET') {
       try {
         const user = await requireSessionUser(request, env)
-        return jsonResponse({
-          user_id: user.user_id,
-          email: user.email,
-          email_verified_at: user.email_verified_at,
-        })
+        return jsonResponse({ user_id: user.user_id, email: user.email })
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 401
         return jsonResponse({ error: errorMessage(err) }, status)
       }
     }
 
-    // GET /api/hexes — all registered hexes (for map)
-    if (url.pathname === '/api/hexes' && request.method === 'GET') {
-      try {
-        const hexes = await getAllHexes(env.DB)
-        const data = hexes.map(mapHexPublicSummary)
-        return Response.json(data, { headers: corsHeaders })
-      } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
-      }
-    }
-
-    // GET /api/hexes/:id — single hex detail
-    if (url.pathname.startsWith('/api/hexes/') && request.method === 'GET') {
-      const hexId = url.pathname.replace('/api/hexes/', '')
-      try {
-        const hex = await getHexById(env.DB, hexId)
-        if (!hex) return Response.json({ error: 'Not found' }, { status: 404, headers: corsHeaders })
-        return Response.json(mapHexPublicDetail(hex), { headers: corsHeaders })
-      } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
-      }
-    }
-
-    // POST /api/register — register a new hex (called from web form)
-    if (url.pathname === '/api/register' && request.method === 'POST') {
-      try {
-        const body = await request.json()
-        const parsed = registerHexSchema.parse(body)
-        const result = await registerHex(parsed, env)
-        return Response.json(result, { headers: corsHeaders })
-      } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 400, headers: corsHeaders })
-      }
-    }
-
-    // POST /api/agents — authenticated agent registration (owner email from session)
-    if (url.pathname === '/api/agents' && request.method === 'POST') {
+    // POST /api/account/api-key — generate or rotate account API key
+    if (url.pathname === '/api/account/api-key' && request.method === 'POST') {
       try {
         const user = await requireSessionUser(request, env)
-        const body = await request.json()
-        const parsed = createAgentSchema.parse(body)
-        const result = await registerHex({
-          ...parsed,
-          owner_email: user.email,
-        }, env)
-        return jsonResponse(result)
+        const plaintextKey = `hgk_${generateToken(24)}`
+        const keyHash = await sha256(plaintextKey)
+        const prefix = keyPrefix(plaintextKey)
+        await setAccountApiKey(env.DB, user.user_id, keyHash, prefix)
+        return jsonResponse({ key: plaintextKey, key_prefix: prefix })
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400
         return jsonResponse({ error: errorMessage(err) }, status)
       }
     }
 
-    // GET /api/my/agents — list agents owned by authenticated user
-    if (url.pathname === '/api/my/agents' && request.method === 'GET') {
+    // GET /api/sessions — list agent sessions
+    if (url.pathname === '/api/sessions' && request.method === 'GET') {
       try {
         const user = await requireSessionUser(request, env)
-        const hexes = await getHexesByOwnerEmail(env.DB, user.email)
-        const result = hexes.map(hex => ({
-          ...mapHexPublicDetail(hex),
-          colour: DOMAIN_COLOURS[hex.domain as Domain] ?? '#6B7280',
+        const sessions = await listAllSessions(env.DB, user.user_id)
+        return jsonResponse({ sessions })
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    // GET /api/knowledge — browse knowledge store
+    if (url.pathname === '/api/knowledge' && request.method === 'GET') {
+      try {
+        const user = await requireSessionUser(request, env)
+        const limit = Math.min(Number(url.searchParams.get('limit') ?? '50'), 100)
+        const entries = await listKnowledge(env.DB, user.user_id, limit)
+        const mapped = entries.map(e => ({
+          ...e,
+          tags: JSON.parse(e.tags),
         }))
-        return jsonResponse({ agents: result, total: result.length })
+        return jsonResponse({ entries: mapped })
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400
         return jsonResponse({ error: errorMessage(err) }, status)
       }
     }
 
-    // GET /api/my/credits — account balance + ledger
-    if (url.pathname === '/api/my/credits' && request.method === 'GET') {
-      try {
-        const user = await requireSessionUser(request, env)
-        await ensureCreditsAccount(env.DB, user.email)
-        const credits = await getCredits(env.DB, user.email)
-        const ledger = await getCreditsLedgerForAccount(env.DB, user.email, 50)
-        return jsonResponse({
-          account_id: user.email,
-          balance: credits?.balance ?? 0,
-          total_earned: credits?.total_earned ?? 0,
-          total_spent: credits?.total_spent ?? 0,
-          ledger,
-        })
-      } catch (err) {
-        const status = err instanceof HttpError ? err.status : 400
-        return jsonResponse({ error: errorMessage(err) }, status)
-      }
-    }
-
-    // /api/agents/:hexId/keys[/:keyId/revoke]
-    if (url.pathname.startsWith('/api/agents/') && url.pathname.includes('/keys')) {
-      const segments = url.pathname.split('/').filter(Boolean)
-      // Expected:
-      // /api/agents/:hexId/keys
-      // /api/agents/:hexId/keys/:keyId/revoke
-      if (segments.length >= 4 && segments[0] === 'api' && segments[1] === 'agents' && segments[3] === 'keys') {
-        const hexId = decodeURIComponent(segments[2] ?? '')
-        try {
-          const user = await requireSessionUser(request, env)
-          await requireOwnedHex(env, user, hexId)
-
-          if (segments.length === 4 && request.method === 'GET') {
-            const keys = await listAgentApiKeysForHex(env.DB, hexId, user.user_id)
-            return jsonResponse({
-              keys: keys.map(k => ({
-                key_id: k.key_id,
-                key_prefix: k.key_prefix,
-                name: k.name,
-                scopes: parseJsonField<string[]>(k.scopes, []),
-                created_at: k.created_at,
-                last_used_at: k.last_used_at,
-                revoked_at: k.revoked_at,
-              })),
-            })
-          }
-
-          if (segments.length === 4 && request.method === 'POST') {
-            const body = createAgentKeySchema.parse(await request.json())
-            const scopes = body.scopes ?? [...DEFAULT_AGENT_SCOPES]
-            const now = nowUnix()
-            const plaintextKey = `hgk_live_${generateToken(24)}`
-            const keyHash = await sha256(plaintextKey)
-            const keyId = crypto.randomUUID()
-
-            await insertAgentApiKey(env.DB, {
-              key_id: keyId,
-              user_id: user.user_id,
-              hex_id: hexId,
-              key_hash: keyHash,
-              key_prefix: keyPrefix(plaintextKey),
-              name: body.name ?? 'Default agent key',
-              scopes: JSON.stringify(scopes),
-              created_at: now,
-            })
-
-            return jsonResponse({
-              key_id: keyId,
-              key: plaintextKey,
-              key_prefix: keyPrefix(plaintextKey),
-              name: body.name ?? 'Default agent key',
-              scopes,
-              created_at: now,
-            })
-          }
-
-          if (segments.length === 6 && request.method === 'POST' && segments[5] === 'revoke') {
-            const keyId = decodeURIComponent(segments[4] ?? '')
-            const ok = await revokeAgentApiKey(env.DB, keyId, hexId, user.user_id, nowUnix())
-            if (!ok) throw new HttpError(404, 'Key not found or already revoked')
-            return jsonResponse({ ok: true, key_id: keyId })
-          }
-
-          return jsonResponse({ error: 'Not found' }, 404)
-        } catch (err) {
-          const status = err instanceof HttpError ? err.status : 400
-          return jsonResponse({ error: errorMessage(err) }, status)
-        }
-      }
-    }
-
-    // POST /api/discover — discover agents
-    if (url.pathname === '/api/discover' && request.method === 'POST') {
-      try {
-        const body = await request.json()
-        const parsed = discoverAgentsSchema.parse(body)
-        const result = await discoverAgents(parsed, env)
-        return Response.json(result, { headers: corsHeaders })
-      } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 400, headers: corsHeaders })
-      }
-    }
-
-    // REST wrappers for task lifecycle (session-authenticated)
-    if (url.pathname === '/api/tasks/submit' && request.method === 'POST') {
-      try {
-        const user = await requireSessionUser(request, env)
-        const body = submitTaskRestSchema.parse(await request.json())
-        await requireOwnedHex(env, user, body.from_hex)
-        const result = await submitTask({
-          to_hex: body.to_hex,
-          task_description: body.task_description,
-          max_credits: body.max_credits,
-        }, env, {
-          key_id: 'session',
-          user_id: user.user_id,
-          hex_id: body.from_hex,
-          scopes: ['submit_task'],
-        })
-        return jsonResponse(result)
-      } catch (err) {
-        const status = err instanceof HttpError ? err.status : 400
-        return jsonResponse({ error: errorMessage(err) }, status)
-      }
-    }
-
-    if (url.pathname === '/api/tasks/inbox' && request.method === 'GET') {
-      try {
-        const user = await requireSessionUser(request, env)
-        const hexId = url.searchParams.get('hex')
-        if (!hexId) throw new HttpError(400, 'Missing query param: hex')
-        await requireOwnedHex(env, user, hexId)
-        const limit = Number(url.searchParams.get('limit') ?? '25')
-        const result = await pollTasks({ limit }, env, {
-          key_id: 'session',
-          user_id: user.user_id,
-          hex_id: hexId,
-          scopes: ['poll_tasks'],
-        })
-        return jsonResponse(result)
-      } catch (err) {
-        const status = err instanceof HttpError ? err.status : 400
-        return jsonResponse({ error: errorMessage(err) }, status)
-      }
-    }
-
-    if (url.pathname === '/api/tasks/claim' && request.method === 'POST') {
-      try {
-        const user = await requireSessionUser(request, env)
-        const body = claimTaskRestSchema.parse(await request.json())
-        await requireOwnedHex(env, user, body.hex_id)
-        const result = await claimTask({ task_id: body.task_id }, env, {
-          key_id: 'session',
-          user_id: user.user_id,
-          hex_id: body.hex_id,
-          scopes: ['claim_task'],
-        })
-        return jsonResponse(result)
-      } catch (err) {
-        const status = err instanceof HttpError ? err.status : 400
-        return jsonResponse({ error: errorMessage(err) }, status)
-      }
-    }
-
-    if (url.pathname === '/api/tasks/complete' && request.method === 'POST') {
-      try {
-        const user = await requireSessionUser(request, env)
-        const body = completeTaskRestSchema.parse(await request.json())
-        await requireOwnedHex(env, user, body.hex_id)
-        const result = await completeTask({
-          task_id: body.task_id,
-          result_summary: body.result_summary,
-        }, env, {
-          key_id: 'session',
-          user_id: user.user_id,
-          hex_id: body.hex_id,
-          scopes: ['complete_task'],
-        })
-        return jsonResponse(result)
-      } catch (err) {
-        const status = err instanceof HttpError ? err.status : 400
-        return jsonResponse({ error: errorMessage(err) }, status)
-      }
-    }
-
-    if (url.pathname === '/api/tasks/rate' && request.method === 'POST') {
-      try {
-        const user = await requireSessionUser(request, env)
-        const body = rateTaskRestSchema.parse(await request.json())
-        await requireOwnedHex(env, user, body.hex_id)
-        const result = await rateTask({
-          task_id: body.task_id,
-          rating: body.rating,
-        }, env, {
-          key_id: 'session',
-          user_id: user.user_id,
-          hex_id: body.hex_id,
-          scopes: ['rate_task'],
-        })
-        return jsonResponse(result)
-      } catch (err) {
-        const status = err instanceof HttpError ? err.status : 400
-        return jsonResponse({ error: errorMessage(err) }, status)
-      }
-    }
-
-    // GET /api/stats — enhanced network stats
-    if (url.pathname === '/api/stats' && request.method === 'GET') {
-      try {
-        const stats = await getEnhancedStats(env.DB)
-        return Response.json(stats, { headers: corsHeaders })
-      } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
-      }
-    }
-
-    // GET /api/activity — recent network events
-    if (url.pathname === '/api/activity' && request.method === 'GET') {
-      try {
-        const limit = Math.min(Number(url.searchParams.get('limit') ?? '20'), 50)
-        const events = await getRecentActivity(env.DB, limit)
-        return Response.json({ events }, { headers: corsHeaders })
-      } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
-      }
-    }
-
-    // GET /api/connections — all connections (for spectator map)
+    // GET /api/connections — connection graph
     if (url.pathname === '/api/connections' && request.method === 'GET') {
       try {
-        const connections = await getAllConnections(env.DB)
-        return Response.json(connections, { headers: corsHeaders })
+        const user = await requireSessionUser(request, env)
+        const connections = await getConnectionsForAccount(env.DB, user.user_id)
+        return jsonResponse({ connections })
       } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
       }
     }
 
-    // GET /api/connections/:hexId — connections for one agent
-    if (url.pathname.startsWith('/api/connections/') && request.method === 'GET') {
-      const hexId = url.pathname.replace('/api/connections/', '')
+    // GET /api/messages — recent messages
+    if (url.pathname === '/api/messages' && request.method === 'GET') {
       try {
-        const connections = await getConnectionsForHex(env.DB, hexId)
-        return Response.json(connections, { headers: corsHeaders })
+        const user = await requireSessionUser(request, env)
+        const limit = Math.min(Number(url.searchParams.get('limit') ?? '50'), 100)
+        const messages = await getRecentMessages(env.DB, user.user_id, limit)
+        return jsonResponse({ messages })
       } catch (err) {
-        return Response.json({ error: errorMessage(err) }, { status: 500, headers: corsHeaders })
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
       }
     }
 
-    // ── MCP onboard (unauthenticated, rate-limited) ──────────────────────────
-    if (url.pathname === '/mcp/onboard' && request.method === 'POST') {
-      const ip = request.headers.get('CF-Connecting-IP') ?? request.headers.get('X-Forwarded-For') ?? 'unknown'
-      const rateLimitKey = `onboard:${ip}`
-
+    // GET /api/stats — account stats
+    if (url.pathname === '/api/stats' && request.method === 'GET') {
       try {
-        const { allowed, remaining } = await checkRateLimit(env.DB, rateLimitKey, 3600, 5)
-        if (!allowed) {
-          return jsonResponse(
-            { error: 'Rate limit exceeded. Max 5 onboard attempts per hour.' },
-            429,
-            { 'X-RateLimit-Remaining': String(remaining) },
-          )
-        }
-
-        const transport = new WebStandardStreamableHTTPServerTransport({
-          enableJsonResponse: true,
-          sessionIdGenerator: undefined,
-        })
-        const server = createOnboardMcpServer(env)
-        await server.connect(transport)
-
-        // Opportunistic cleanup of stale rate limit rows
-        const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200
-        cleanupRateLimits(env.DB, twoHoursAgo).catch(() => {})
-
-        return transport.handleRequest(request)
+        const user = await requireSessionUser(request, env)
+        const stats = await getAccountStats(env.DB, user.user_id)
+        return jsonResponse(stats)
       } catch (err) {
-        return jsonResponse({ error: errorMessage(err) }, 500)
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
       }
     }
 
@@ -716,34 +304,23 @@ export default {
         return jsonResponse({ error: 'Missing bearer token' }, 401)
       }
       const tokenHash = await sha256(token)
-      const apiKey = await getAgentApiKeyByHash(env.DB, tokenHash)
-      if (!apiKey) {
+      const user = await getUserByAccountApiKeyHash(env.DB, tokenHash)
+      if (!user) {
         return jsonResponse({ error: 'Invalid API key' }, 401)
       }
 
-      const scopes = parseJsonField<string[]>(apiKey.scopes, [])
-      await touchAgentApiKeyLastUsed(env.DB, apiKey.key_id, nowUnix())
-
-      // Stateless mode: sessionIdGenerator=undefined disables sessions + SSE.
-      // Each POST is independently processed and returns JSON directly.
-      // Workers can't hold long-lived SSE connections, so this is required.
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
         sessionIdGenerator: undefined,
       })
-      const server = createMcpServer(env, {
-        key_id: apiKey.key_id,
-        user_id: apiKey.user_id,
-        hex_id: apiKey.hex_id,
-        scopes,
-      })
+      const server = createMcpServer(env, { account_id: user.user_id })
       await server.connect(transport)
       return transport.handleRequest(request)
     }
 
-    return Response.json(
-      { error: 'Not found', hint: 'Try /health, /api/hexes, or /mcp' },
-      { status: 404, headers: corsHeaders }
+    return jsonResponse(
+      { error: 'Not found', hint: 'Try /health, /api/stats, or /mcp' },
+      404,
     )
-  }
+  },
 }

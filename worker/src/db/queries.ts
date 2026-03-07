@@ -1,26 +1,14 @@
-// HexGrid — D1 Query Helpers
+// HexGrid — D1 Query Helpers (Orchestration Platform)
 
 import type {
-  ActivityEvent,
-  AgentApiKeyRow,
+  AgentSessionRow,
   AuthCodeRow,
-  ConnectionInsightRow,
   ConnectionRow,
-  CreditsLedgerRow,
-  CreditsRow,
-  Domain,
-  HexRow,
-  InteractionRow,
+  KnowledgeRow,
+  MessageRow,
   SessionUser,
-  TaskRow,
   UserRow,
 } from '../lib/types'
-
-type RunResult = { meta?: { changes?: number } }
-
-function changed(result: RunResult): boolean {
-  return (result.meta?.changes ?? 0) > 0
-}
 
 // ─── USERS + AUTH ─────────────────────────────────────────────────────────────
 
@@ -36,33 +24,15 @@ export async function getUserByEmail(db: D1Database, email: string): Promise<Use
 
 export async function createUser(db: D1Database, userId: string, email: string, createdAt: number): Promise<void> {
   await db
-    .prepare(`
-      INSERT OR IGNORE INTO users (user_id, email, created_at)
-      VALUES (?, ?, ?)
-    `)
+    .prepare('INSERT OR IGNORE INTO users (user_id, email, created_at) VALUES (?, ?, ?)')
     .bind(userId, email, createdAt)
     .run()
 }
 
 export async function markUserEmailVerified(db: D1Database, userId: string, verifiedAt: number): Promise<void> {
   await db
-    .prepare(`
-      UPDATE users
-      SET email_verified_at = COALESCE(email_verified_at, ?)
-      WHERE user_id = ?
-    `)
+    .prepare('UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE user_id = ?')
     .bind(verifiedAt, userId)
-    .run()
-}
-
-export async function markStarterCreditsGranted(db: D1Database, userId: string, grantedAt: number): Promise<void> {
-  await db
-    .prepare(`
-      UPDATE users
-      SET starter_credits_granted_at = COALESCE(starter_credits_granted_at, ?)
-      WHERE user_id = ?
-    `)
-    .bind(grantedAt, userId)
     .run()
 }
 
@@ -104,7 +74,7 @@ export async function deleteAuthCode(db: D1Database, email: string): Promise<voi
   await db.prepare('DELETE FROM auth_codes WHERE email = ?').bind(email).run()
 }
 
-export async function createSession(
+export async function createWebSession(
   db: D1Database,
   sessionId: string,
   userId: string,
@@ -113,10 +83,7 @@ export async function createSession(
   createdAt: number,
 ): Promise<void> {
   await db
-    .prepare(`
-      INSERT INTO sessions (session_id, user_id, token_hash, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `)
+    .prepare('INSERT INTO sessions (session_id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
     .bind(sessionId, userId, tokenHash, expiresAt, createdAt)
     .run()
 }
@@ -128,16 +95,10 @@ export async function getSessionUserByTokenHash(
 ): Promise<SessionUser | null> {
   const result = await db
     .prepare(`
-      SELECT
-        u.user_id,
-        u.email,
-        u.email_verified_at,
-        u.starter_credits_granted_at
+      SELECT u.user_id, u.email, u.email_verified_at
       FROM sessions s
       INNER JOIN users u ON u.user_id = s.user_id
-      WHERE s.token_hash = ?
-        AND s.revoked_at IS NULL
-        AND s.expires_at > ?
+      WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?
       LIMIT 1
     `)
     .bind(tokenHash, now)
@@ -152,397 +113,359 @@ export async function revokeSessionByTokenHash(db: D1Database, tokenHash: string
     .run()
 }
 
-// ─── HEXES ────────────────────────────────────────────────────────────────────
+// ─── ACCOUNT API KEYS ────────────────────────────────────────────────────────
 
-export async function getHexByPublicKey(db: D1Database, publicKey: string): Promise<HexRow | null> {
-  const result = await db.prepare('SELECT * FROM hexes WHERE public_key = ?').bind(publicKey).first<HexRow>()
-  return result ?? null
-}
-
-export async function getHexById(db: D1Database, hexId: string): Promise<HexRow | null> {
-  const result = await db.prepare('SELECT * FROM hexes WHERE hex_id = ?').bind(hexId).first<HexRow>()
-  return result ?? null
-}
-
-export async function getHexesByOwnerEmail(db: D1Database, email: string): Promise<HexRow[]> {
+export async function getUserByAccountApiKeyHash(db: D1Database, keyHash: string): Promise<UserRow | null> {
   const result = await db
-    .prepare('SELECT * FROM hexes WHERE owner_email = ? AND active = 1 ORDER BY created_at DESC')
-    .bind(email)
-    .all<HexRow>()
+    .prepare('SELECT * FROM users WHERE account_api_key_hash = ?')
+    .bind(keyHash)
+    .first<UserRow>()
+  return result ?? null
+}
+
+export async function setAccountApiKey(
+  db: D1Database,
+  userId: string,
+  keyHash: string,
+  keyPrefix: string,
+): Promise<void> {
+  await db
+    .prepare('UPDATE users SET account_api_key_hash = ?, account_api_key_prefix = ? WHERE user_id = ?')
+    .bind(keyHash, keyPrefix, userId)
+    .run()
+}
+
+// ─── AGENT SESSIONS ──────────────────────────────────────────────────────────
+
+export async function insertAgentSession(
+  db: D1Database,
+  session: Omit<AgentSessionRow, 'disconnected_at'>,
+): Promise<void> {
+  await db
+    .prepare(`
+      INSERT INTO agent_sessions (
+        session_id, account_id, name, repo_url, description,
+        capabilities, hex_id, status, last_heartbeat, connected_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .bind(
+      session.session_id,
+      session.account_id,
+      session.name,
+      session.repo_url,
+      session.description,
+      session.capabilities,
+      session.hex_id,
+      session.status,
+      session.last_heartbeat,
+      session.connected_at,
+    )
+    .run()
+}
+
+export async function getAgentSession(db: D1Database, sessionId: string): Promise<AgentSessionRow | null> {
+  const result = await db
+    .prepare('SELECT * FROM agent_sessions WHERE session_id = ?')
+    .bind(sessionId)
+    .first<AgentSessionRow>()
+  return result ?? null
+}
+
+export async function listActiveSessions(db: D1Database, accountId: string): Promise<AgentSessionRow[]> {
+  const result = await db
+    .prepare("SELECT * FROM agent_sessions WHERE account_id = ? AND status = 'active' ORDER BY connected_at DESC")
+    .bind(accountId)
+    .all<AgentSessionRow>()
   return result.results
 }
 
-export async function getOwnedHexById(db: D1Database, hexId: string, email: string): Promise<HexRow | null> {
+export async function listAllSessions(db: D1Database, accountId: string): Promise<AgentSessionRow[]> {
   const result = await db
-    .prepare('SELECT * FROM hexes WHERE hex_id = ? AND owner_email = ? AND active = 1')
-    .bind(hexId, email)
-    .first<HexRow>()
-  return result ?? null
+    .prepare('SELECT * FROM agent_sessions WHERE account_id = ? ORDER BY connected_at DESC LIMIT 50')
+    .bind(accountId)
+    .all<AgentSessionRow>()
+  return result.results
+}
+
+export async function updateHeartbeat(db: D1Database, sessionId: string, now: number): Promise<void> {
+  await db
+    .prepare("UPDATE agent_sessions SET last_heartbeat = ? WHERE session_id = ? AND status = 'active'")
+    .bind(now, sessionId)
+    .run()
+}
+
+export async function disconnectSession(db: D1Database, sessionId: string, now: number): Promise<void> {
+  await db
+    .prepare("UPDATE agent_sessions SET status = 'disconnected', disconnected_at = ? WHERE session_id = ? AND status = 'active'")
+    .bind(now, sessionId)
+    .run()
+}
+
+export async function expireStaleSessions(db: D1Database, staleThreshold: number): Promise<void> {
+  await db
+    .prepare("UPDATE agent_sessions SET status = 'disconnected', disconnected_at = last_heartbeat WHERE status = 'active' AND last_heartbeat < ?")
+    .bind(staleThreshold)
+    .run()
 }
 
 export async function getAllOccupiedHexIds(db: D1Database): Promise<Set<string>> {
-  const result = await db.prepare('SELECT hex_id FROM hexes').all<{ hex_id: string }>()
+  const result = await db
+    .prepare("SELECT hex_id FROM agent_sessions WHERE status = 'active'")
+    .all<{ hex_id: string }>()
   return new Set(result.results.map(r => r.hex_id))
 }
 
-export async function insertHex(
-  db: D1Database,
-  hex: Omit<HexRow, 'reputation_score' | 'total_tasks' | 'active'>,
-): Promise<void> {
+// ─── KNOWLEDGE ────────────────────────────────────────────────────────────────
+
+export async function insertKnowledge(db: D1Database, entry: KnowledgeRow): Promise<void> {
   await db
     .prepare(`
-      INSERT INTO hexes (
-        hex_id, public_key, owner_email, agent_name, description,
-        domain, capabilities, price_per_task, availability,
-        allowed_actions, reputation_score, total_tasks, active, created_at,
-        mcp_endpoint, onboarded_via
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 50.0, 0, 1, ?, ?, ?)
+      INSERT INTO knowledge (id, account_id, session_id, topic, content, tags, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .bind(
-      hex.hex_id,
-      hex.public_key,
-      hex.owner_email,
-      hex.agent_name,
-      hex.description,
-      hex.domain,
-      hex.capabilities,
-      hex.price_per_task,
-      hex.availability,
-      hex.allowed_actions,
-      hex.created_at,
-      hex.mcp_endpoint,
-      hex.onboarded_via,
+      entry.id,
+      entry.account_id,
+      entry.session_id,
+      entry.topic,
+      entry.content,
+      entry.tags,
+      entry.created_at,
+      entry.updated_at,
     )
     .run()
 }
 
-export async function discoverHexes(
-  db: D1Database,
-  domain: Domain,
-  maxCredits: number,
-  limit = 5,
-): Promise<HexRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT * FROM hexes
-      WHERE domain = ?
-        AND price_per_task <= ?
-        AND active = 1
-      ORDER BY reputation_score DESC, total_tasks DESC
-      LIMIT ?
-    `)
-    .bind(domain, maxCredits, limit)
-    .all<HexRow>()
-  return result.results
-}
-
-export async function getAllHexes(db: D1Database): Promise<HexRow[]> {
-  const result = await db.prepare('SELECT * FROM hexes WHERE active = 1 ORDER BY created_at ASC').all<HexRow>()
-  return result.results
-}
-
-// ─── API KEYS ─────────────────────────────────────────────────────────────────
-
-export async function insertAgentApiKey(
-  db: D1Database,
-  key: Omit<AgentApiKeyRow, 'last_used_at' | 'revoked_at'>,
-): Promise<void> {
-  await db
-    .prepare(`
-      INSERT INTO agent_api_keys (
-        key_id, user_id, hex_id, key_hash, key_prefix, name, scopes, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .bind(key.key_id, key.user_id, key.hex_id, key.key_hash, key.key_prefix, key.name, key.scopes, key.created_at)
-    .run()
-}
-
-export async function getAgentApiKeyByHash(db: D1Database, keyHash: string): Promise<AgentApiKeyRow | null> {
-  const result = await db
-    .prepare('SELECT * FROM agent_api_keys WHERE key_hash = ? AND revoked_at IS NULL')
-    .bind(keyHash)
-    .first<AgentApiKeyRow>()
-  return result ?? null
-}
-
-export async function listAgentApiKeysForHex(
-  db: D1Database,
-  hexId: string,
-  userId: string,
-): Promise<AgentApiKeyRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT * FROM agent_api_keys
-      WHERE hex_id = ? AND user_id = ?
-      ORDER BY created_at DESC
-    `)
-    .bind(hexId, userId)
-    .all<AgentApiKeyRow>()
-  return result.results
-}
-
-export async function touchAgentApiKeyLastUsed(db: D1Database, keyId: string, now: number): Promise<void> {
-  await db
-    .prepare('UPDATE agent_api_keys SET last_used_at = ? WHERE key_id = ?')
-    .bind(now, keyId)
-    .run()
-}
-
-export async function revokeAgentApiKey(
-  db: D1Database,
-  keyId: string,
-  hexId: string,
-  userId: string,
-  now: number,
-): Promise<boolean> {
-  const result = await db
-    .prepare(`
-      UPDATE agent_api_keys
-      SET revoked_at = ?
-      WHERE key_id = ? AND hex_id = ? AND user_id = ? AND revoked_at IS NULL
-    `)
-    .bind(now, keyId, hexId, userId)
-    .run()
-  return changed(result as RunResult)
-}
-
-// ─── TASKS + INTERACTIONS ─────────────────────────────────────────────────────
-
-export async function insertTask(db: D1Database, task: TaskRow): Promise<void> {
-  await db
-    .prepare(`
-      INSERT INTO tasks (
-        task_id, from_hex, to_hex, description, description_hash,
-        credits_escrowed, status, created_at, claimed_at, completed_at, result_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .bind(
-      task.task_id,
-      task.from_hex,
-      task.to_hex,
-      task.description,
-      task.description_hash,
-      task.credits_escrowed,
-      task.status,
-      task.created_at,
-      task.claimed_at,
-      task.completed_at,
-      task.result_hash,
-    )
-    .run()
-}
-
-export async function getTaskById(db: D1Database, taskId: string): Promise<TaskRow | null> {
-  const result = await db.prepare('SELECT * FROM tasks WHERE task_id = ?').bind(taskId).first<TaskRow>()
-  return result ?? null
-}
-
-export async function listQueuedTasksForHex(db: D1Database, hexId: string, limit = 25): Promise<TaskRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT * FROM tasks
-      WHERE to_hex = ? AND status = 'queued'
-      ORDER BY created_at ASC
-      LIMIT ?
-    `)
-    .bind(hexId, limit)
-    .all<TaskRow>()
-  return result.results
-}
-
-export async function claimQueuedTask(db: D1Database, taskId: string, providerHex: string, now: number): Promise<boolean> {
-  const result = await db
-    .prepare(`
-      UPDATE tasks
-      SET status = 'active', claimed_at = ?
-      WHERE task_id = ? AND to_hex = ? AND status = 'queued'
-    `)
-    .bind(now, taskId, providerHex)
-    .run()
-  return changed(result as RunResult)
-}
-
-export async function completeActiveTask(
-  db: D1Database,
-  taskId: string,
-  providerHex: string,
-  resultHash: string,
-  now: number,
-): Promise<boolean> {
-  const result = await db
-    .prepare(`
-      UPDATE tasks
-      SET status = 'complete', completed_at = ?, result_hash = ?
-      WHERE task_id = ? AND to_hex = ? AND status = 'active'
-    `)
-    .bind(now, resultHash, taskId, providerHex)
-    .run()
-  return changed(result as RunResult)
-}
-
-export async function insertInteraction(
-  db: D1Database,
-  interaction: InteractionRow,
-): Promise<void> {
-  await db
-    .prepare(`
-      INSERT OR IGNORE INTO interactions (
-        interaction_id, task_id, provider_hex, consumer_hex, outcome,
-        rating, credits_transferred, platform_fee, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .bind(
-      interaction.interaction_id,
-      interaction.task_id,
-      interaction.provider_hex,
-      interaction.consumer_hex,
-      interaction.outcome,
-      interaction.rating,
-      interaction.credits_transferred,
-      interaction.platform_fee,
-      interaction.created_at,
-    )
-    .run()
-}
-
-export async function getInteractionByTaskId(db: D1Database, taskId: string): Promise<InteractionRow | null> {
-  const result = await db
-    .prepare('SELECT * FROM interactions WHERE task_id = ?')
-    .bind(taskId)
-    .first<InteractionRow>()
-  return result ?? null
-}
-
-export async function setInteractionRating(
-  db: D1Database,
-  taskId: string,
-  rating: number,
-): Promise<boolean> {
-  const result = await db
-    .prepare(`
-      UPDATE interactions
-      SET rating = ?
-      WHERE task_id = ? AND rating IS NULL
-    `)
-    .bind(rating, taskId)
-    .run()
-  return changed(result as RunResult)
-}
-
-export async function refreshProviderStats(db: D1Database, providerHex: string): Promise<void> {
-  const aggregate = await db
-    .prepare(`
-      SELECT
-        COUNT(*) AS total_tasks,
-        COUNT(rating) AS rated_tasks,
-        AVG(rating) AS avg_rating
-      FROM interactions
-      WHERE provider_hex = ? AND outcome = 'success'
-    `)
-    .bind(providerHex)
-    .first<{ total_tasks: number; rated_tasks: number; avg_rating: number | null }>()
-
-  const totalTasks = aggregate?.total_tasks ?? 0
-  const ratedTasks = aggregate?.rated_tasks ?? 0
-  const avgRating = aggregate?.avg_rating ?? null
-
-  const reputation = ratedTasks > 0 && avgRating !== null
-    ? Math.round(avgRating * 20 * 10) / 10
-    : 50
-
-  await db
-    .prepare(`
-      UPDATE hexes
-      SET total_tasks = ?, reputation_score = ?
-      WHERE hex_id = ?
-    `)
-    .bind(totalTasks, reputation, providerHex)
-    .run()
-}
-
-// ─── CREDITS + LEDGER ─────────────────────────────────────────────────────────
-
-export async function ensureCreditsAccount(db: D1Database, accountId: string): Promise<void> {
-  const now = Math.floor(Date.now() / 1000)
-  await db
-    .prepare(`
-      INSERT OR IGNORE INTO credits (account_id, balance, total_earned, total_spent, created_at, updated_at)
-      VALUES (?, 0, 0, 0, ?, ?)
-    `)
-    .bind(accountId, now, now)
-    .run()
-}
-
-export async function getCredits(db: D1Database, accountId: string): Promise<CreditsRow | null> {
-  const result = await db.prepare('SELECT * FROM credits WHERE account_id = ?').bind(accountId).first<CreditsRow>()
-  return result ?? null
-}
-
-export async function debitCreditsIfEnough(
+export async function searchKnowledge(
   db: D1Database,
   accountId: string,
-  amount: number,
-  now: number,
-): Promise<boolean> {
-  const result = await db
-    .prepare(`
-      UPDATE credits
-      SET balance = balance - ?, total_spent = total_spent + ?, updated_at = ?
-      WHERE account_id = ? AND balance >= ?
-    `)
-    .bind(amount, amount, now, accountId, amount)
-    .run()
-  return changed(result as RunResult)
+  query?: string,
+  tags?: string[],
+  limit = 20,
+): Promise<Array<KnowledgeRow & { session_name: string }>> {
+  let sql = `
+    SELECT k.*, s.name AS session_name
+    FROM knowledge k
+    LEFT JOIN agent_sessions s ON s.session_id = k.session_id
+    WHERE k.account_id = ?
+  `
+  const params: (string | number)[] = [accountId]
+
+  if (query) {
+    sql += ' AND (k.topic LIKE ? OR k.content LIKE ?)'
+    const like = `%${query}%`
+    params.push(like, like)
+  }
+
+  if (tags && tags.length > 0) {
+    for (const tag of tags) {
+      sql += ' AND k.tags LIKE ?'
+      params.push(`%"${tag}"%`)
+    }
+  }
+
+  sql += ' ORDER BY k.updated_at DESC LIMIT ?'
+  params.push(limit)
+
+  const stmt = db.prepare(sql)
+  const bound = stmt.bind(...params)
+  const result = await bound.all<KnowledgeRow & { session_name: string }>()
+  return result.results
 }
 
-export async function creditCredits(
-  db: D1Database,
-  accountId: string,
-  amount: number,
-  now: number,
-): Promise<void> {
-  await db
-    .prepare(`
-      UPDATE credits
-      SET balance = balance + ?, total_earned = total_earned + ?, updated_at = ?
-      WHERE account_id = ?
-    `)
-    .bind(amount, amount, now, accountId)
-    .run()
-}
-
-export async function insertCreditsLedgerEntry(
-  db: D1Database,
-  entry: CreditsLedgerRow,
-): Promise<void> {
-  await db
-    .prepare(`
-      INSERT INTO credits_ledger (
-        entry_id, account_id, delta, reason, task_id, metadata, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
-    .bind(entry.entry_id, entry.account_id, entry.delta, entry.reason, entry.task_id, entry.metadata, entry.created_at)
-    .run()
-}
-
-export async function getCreditsLedgerForAccount(
+export async function listKnowledge(
   db: D1Database,
   accountId: string,
   limit = 50,
-): Promise<CreditsLedgerRow[]> {
+): Promise<Array<KnowledgeRow & { session_name: string }>> {
   const result = await db
     .prepare(`
-      SELECT * FROM credits_ledger
-      WHERE account_id = ?
-      ORDER BY created_at DESC
+      SELECT k.*, s.name AS session_name
+      FROM knowledge k
+      LEFT JOIN agent_sessions s ON s.session_id = k.session_id
+      WHERE k.account_id = ?
+      ORDER BY k.updated_at DESC
       LIMIT ?
     `)
     .bind(accountId, limit)
-    .all<CreditsLedgerRow>()
+    .all<KnowledgeRow & { session_name: string }>()
   return result.results
 }
 
-// ─── RATE LIMITING ───────────────────────────────────────────────────────
+export async function deleteKnowledge(db: D1Database, id: string, accountId: string): Promise<boolean> {
+  const result = await db
+    .prepare('DELETE FROM knowledge WHERE id = ? AND account_id = ?')
+    .bind(id, accountId)
+    .run()
+  return (result.meta?.changes ?? 0) > 0
+}
+
+// ─── MESSAGES ─────────────────────────────────────────────────────────────────
+
+export async function insertMessage(db: D1Database, msg: MessageRow): Promise<void> {
+  await db
+    .prepare(`
+      INSERT INTO messages (id, account_id, from_session_id, to_session_id, question, answer, status, created_at, answered_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .bind(
+      msg.id,
+      msg.account_id,
+      msg.from_session_id,
+      msg.to_session_id,
+      msg.question,
+      msg.answer,
+      msg.status,
+      msg.created_at,
+      msg.answered_at,
+      msg.expires_at,
+    )
+    .run()
+}
+
+export async function getPendingMessages(
+  db: D1Database,
+  toSessionId: string,
+): Promise<Array<MessageRow & { from_session_name: string }>> {
+  const result = await db
+    .prepare(`
+      SELECT m.*, s.name AS from_session_name
+      FROM messages m
+      LEFT JOIN agent_sessions s ON s.session_id = m.from_session_id
+      WHERE m.to_session_id = ? AND m.status = 'pending'
+      ORDER BY m.created_at ASC
+    `)
+    .bind(toSessionId)
+    .all<MessageRow & { from_session_name: string }>()
+  return result.results
+}
+
+export async function answerMessage(
+  db: D1Database,
+  messageId: string,
+  toSessionId: string,
+  answer: string,
+  now: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare("UPDATE messages SET answer = ?, status = 'answered', answered_at = ? WHERE id = ? AND to_session_id = ? AND status = 'pending'")
+    .bind(answer, now, messageId, toSessionId)
+    .run()
+  return (result.meta?.changes ?? 0) > 0
+}
+
+export async function getMessageById(db: D1Database, messageId: string): Promise<MessageRow | null> {
+  const result = await db
+    .prepare('SELECT * FROM messages WHERE id = ?')
+    .bind(messageId)
+    .first<MessageRow>()
+  return result ?? null
+}
+
+export async function expireOldMessages(db: D1Database, now: number): Promise<void> {
+  await db
+    .prepare("UPDATE messages SET status = 'expired' WHERE status = 'pending' AND expires_at < ?")
+    .bind(now)
+    .run()
+}
+
+export async function deleteOldAnsweredMessages(db: D1Database, olderThan: number): Promise<void> {
+  await db
+    .prepare("DELETE FROM messages WHERE status = 'answered' AND answered_at < ?")
+    .bind(olderThan)
+    .run()
+}
+
+export async function countPendingMessages(db: D1Database, toSessionId: string): Promise<number> {
+  const result = await db
+    .prepare("SELECT COUNT(*) AS count FROM messages WHERE to_session_id = ? AND status = 'pending'")
+    .bind(toSessionId)
+    .first<{ count: number }>()
+  return result?.count ?? 0
+}
+
+export async function getRecentMessages(
+  db: D1Database,
+  accountId: string,
+  limit = 50,
+): Promise<Array<MessageRow & { from_session_name: string; to_session_name: string }>> {
+  const result = await db
+    .prepare(`
+      SELECT m.*,
+        sf.name AS from_session_name,
+        st.name AS to_session_name
+      FROM messages m
+      LEFT JOIN agent_sessions sf ON sf.session_id = m.from_session_id
+      LEFT JOIN agent_sessions st ON st.session_id = m.to_session_id
+      WHERE m.account_id = ?
+      ORDER BY m.created_at DESC
+      LIMIT ?
+    `)
+    .bind(accountId, limit)
+    .all<MessageRow & { from_session_name: string; to_session_name: string }>()
+  return result.results
+}
+
+// ─── CONNECTIONS ──────────────────────────────────────────────────────────────
+
+export async function upsertConnection(
+  db: D1Database,
+  accountId: string,
+  sessionAId: string,
+  sessionBId: string,
+  now: number,
+): Promise<void> {
+  // Normalize order so (A,B) and (B,A) map to same row
+  const [a, b] = sessionAId < sessionBId ? [sessionAId, sessionBId] : [sessionBId, sessionAId]
+  await db
+    .prepare(`
+      INSERT INTO connections (id, account_id, session_a_id, session_b_id, interaction_count, strength, last_interaction)
+      VALUES (?, ?, ?, ?, 1, 1, ?)
+      ON CONFLICT(account_id, session_a_id, session_b_id) DO UPDATE SET
+        interaction_count = connections.interaction_count + 1,
+        strength = connections.interaction_count + 1,
+        last_interaction = excluded.last_interaction
+    `)
+    .bind(crypto.randomUUID(), accountId, a, b, now)
+    .run()
+}
+
+export async function getConnectionsForAccount(db: D1Database, accountId: string): Promise<ConnectionRow[]> {
+  const result = await db
+    .prepare('SELECT * FROM connections WHERE account_id = ? ORDER BY strength DESC')
+    .bind(accountId)
+    .all<ConnectionRow>()
+  return result.results
+}
+
+// ─── STATS ────────────────────────────────────────────────────────────────────
+
+export async function getAccountStats(db: D1Database, accountId: string): Promise<{
+  active_sessions: number
+  total_knowledge: number
+  total_messages: number
+  total_connections: number
+}> {
+  const [sessions, knowledge, messages, connections] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS c FROM agent_sessions WHERE account_id = ? AND status = 'active'")
+      .bind(accountId).first<{ c: number }>(),
+    db.prepare('SELECT COUNT(*) AS c FROM knowledge WHERE account_id = ?')
+      .bind(accountId).first<{ c: number }>(),
+    db.prepare('SELECT COUNT(*) AS c FROM messages WHERE account_id = ?')
+      .bind(accountId).first<{ c: number }>(),
+    db.prepare('SELECT COUNT(*) AS c FROM connections WHERE account_id = ?')
+      .bind(accountId).first<{ c: number }>(),
+  ])
+
+  return {
+    active_sessions: sessions?.c ?? 0,
+    total_knowledge: knowledge?.c ?? 0,
+    total_messages: messages?.c ?? 0,
+    total_connections: connections?.c ?? 0,
+  }
+}
+
+// ─── RATE LIMITING ────────────────────────────────────────────────────────────
 
 export async function checkRateLimit(
   db: D1Database,
@@ -575,197 +498,5 @@ export async function checkRateLimit(
 }
 
 export async function cleanupRateLimits(db: D1Database, olderThan: number): Promise<void> {
-  await db
-    .prepare('DELETE FROM rate_limits WHERE window_start < ?')
-    .bind(olderThan)
-    .run()
-}
-
-// ─── ACTIVITY FEED ───────────────────────────────────────────────────────
-
-export async function getRecentActivity(db: D1Database, limit = 20): Promise<ActivityEvent[]> {
-  const result = await db
-    .prepare(`
-      SELECT
-        'registration' AS type,
-        h.agent_name,
-        h.domain,
-        h.hex_id,
-        h.created_at AS timestamp,
-        '{}' AS metadata
-      FROM hexes h
-      WHERE h.active = 1
-
-      UNION ALL
-
-      SELECT
-        'task_completed' AS type,
-        provider.agent_name,
-        provider.domain,
-        provider.hex_id,
-        i.created_at AS timestamp,
-        json_object('rating', i.rating, 'credits', i.credits_transferred) AS metadata
-      FROM interactions i
-      JOIN hexes provider ON provider.hex_id = i.provider_hex
-
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `)
-    .bind(limit)
-    .all<{
-      type: string
-      agent_name: string
-      domain: string
-      hex_id: string
-      timestamp: number
-      metadata: string
-    }>()
-
-  return result.results.map(r => ({
-    type: r.type as ActivityEvent['type'],
-    agent_name: r.agent_name,
-    domain: r.domain as ActivityEvent['domain'],
-    hex_id: r.hex_id,
-    timestamp: r.timestamp,
-    metadata: JSON.parse(r.metadata),
-  }))
-}
-
-// ─── CONNECTIONS ─────────────────────────────────────────────────────────
-
-export async function upsertConnection(
-  db: D1Database,
-  fromHex: string,
-  toHex: string,
-  now: number,
-): Promise<void> {
-  await db
-    .prepare(`
-      INSERT INTO connections (from_hex, to_hex, interaction_count, total_rating_sum, rating_count, strength, first_interaction_at, last_interaction_at)
-      VALUES (?, ?, 1, 0, 0, 0.6, ?, ?)
-      ON CONFLICT(from_hex, to_hex) DO UPDATE SET
-        interaction_count = interaction_count + 1,
-        last_interaction_at = excluded.last_interaction_at,
-        strength = (interaction_count + 1) * (CASE WHEN rating_count > 0 THEN (total_rating_sum / rating_count) / 5.0 ELSE 0.6 END)
-    `)
-    .bind(fromHex, toHex, now, now)
-    .run()
-}
-
-export async function updateConnectionRating(
-  db: D1Database,
-  fromHex: string,
-  toHex: string,
-  rating: number,
-): Promise<void> {
-  await db
-    .prepare(`
-      UPDATE connections
-      SET
-        total_rating_sum = total_rating_sum + ?,
-        rating_count = rating_count + 1,
-        strength = interaction_count * ((total_rating_sum + ?) / (rating_count + 1) / 5.0)
-      WHERE from_hex = ? AND to_hex = ?
-    `)
-    .bind(rating, rating, fromHex, toHex)
-    .run()
-}
-
-export async function getConnectionsForHex(
-  db: D1Database,
-  hexId: string,
-): Promise<ConnectionRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT * FROM connections
-      WHERE from_hex = ? OR to_hex = ?
-      ORDER BY strength DESC
-    `)
-    .bind(hexId, hexId)
-    .all<ConnectionRow>()
-  return result.results
-}
-
-export async function getAllConnections(db: D1Database): Promise<ConnectionRow[]> {
-  const result = await db
-    .prepare('SELECT * FROM connections WHERE strength > 0 ORDER BY strength DESC')
-    .all<ConnectionRow>()
-  return result.results
-}
-
-export async function getConnectionBetween(
-  db: D1Database,
-  fromHex: string,
-  toHex: string,
-): Promise<ConnectionRow | null> {
-  const result = await db
-    .prepare('SELECT * FROM connections WHERE from_hex = ? AND to_hex = ?')
-    .bind(fromHex, toHex)
-    .first<ConnectionRow>()
-  return result ?? null
-}
-
-export async function getInsightsForHex(
-  db: D1Database,
-  hexId: string,
-  limit = 50,
-): Promise<ConnectionInsightRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT * FROM connection_insights
-      WHERE to_hex = ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    `)
-    .bind(hexId, limit)
-    .all<ConnectionInsightRow>()
-  return result.results
-}
-
-// ─── ENHANCED STATS ──────────────────────────────────────────────────────
-
-export async function getEnhancedStats(db: D1Database): Promise<{
-  total_agents: number
-  total_tasks: number
-  avg_reputation: number
-  by_domain: Record<string, number>
-  credits_24h: number
-  tasks_24h: number
-}> {
-  const hexes = await getAllHexes(db)
-  const byDomain = hexes.reduce<Record<string, number>>((acc, h) => {
-    acc[h.domain] = (acc[h.domain] ?? 0) + 1
-    return acc
-  }, {})
-
-  const oneDayAgo = Math.floor(Date.now() / 1000) - 86400
-
-  const credits24h = await db
-    .prepare(`
-      SELECT COALESCE(SUM(credits_transferred), 0) AS total
-      FROM interactions
-      WHERE created_at > ?
-    `)
-    .bind(oneDayAgo)
-    .first<{ total: number }>()
-
-  const tasks24h = await db
-    .prepare(`
-      SELECT COUNT(*) AS total
-      FROM tasks
-      WHERE created_at > ?
-    `)
-    .bind(oneDayAgo)
-    .first<{ total: number }>()
-
-  return {
-    total_agents: hexes.length,
-    total_tasks: hexes.reduce((sum, h) => sum + h.total_tasks, 0),
-    avg_reputation: hexes.length
-      ? Math.round(hexes.reduce((sum, h) => sum + h.reputation_score, 0) / hexes.length * 10) / 10
-      : 0,
-    by_domain: byDomain,
-    credits_24h: credits24h?.total ?? 0,
-    tasks_24h: tasks24h?.total ?? 0,
-  }
+  await db.prepare('DELETE FROM rate_limits WHERE window_start < ?').bind(olderThan).run()
 }
