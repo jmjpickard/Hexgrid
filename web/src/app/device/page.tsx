@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { Suspense, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 
 const WORKER_URL = process.env.NEXT_PUBLIC_WORKER_URL ?? 'https://api.hexgrid.app'
@@ -9,7 +9,7 @@ function normaliseUserCode(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
 }
 
-export default function DeviceApprovalPage() {
+function DeviceApprovalContent() {
   const searchParams = useSearchParams()
   const initialCode = useMemo(() => normaliseUserCode(searchParams.get('code') ?? ''), [searchParams])
   const [code, setCode] = useState(initialCode)
@@ -79,5 +79,13 @@ export default function DeviceApprovalPage() {
         {error && <p className="mt-3 text-xs font-mono text-red-400">{error}</p>}
       </div>
     </main>
+  )
+}
+
+export default function DeviceApprovalPage() {
+  return (
+    <Suspense fallback={null}>
+      <DeviceApprovalContent />
+    </Suspense>
   )
 }

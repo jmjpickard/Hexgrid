@@ -1,8 +1,30 @@
 {
   "name": "hexgrid-cli",
   "version": "0.1.0",
-  "private": true,
+  "description": "HexGrid command line client for login and repo session lifecycle",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/hexgrid.mjs",
+    "README.md"
+  ],
+  "keywords": [
+    "hexgrid",
+    "cli",
+    "agents",
+    "codex",
+    "claude",
+    "mcp"
+  ],
+  "scripts": {
+    "check": "node ./bin/hexgrid.mjs --help",
+    "prepublishOnly": "npm run check"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "hexgrid": "./bin/hexgrid.mjs"
   }

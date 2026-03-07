@@ -168,6 +168,14 @@ Issue agent keys from `/api/agents/:hexId/keys`, then use:
 
 Use the CLI to do reliable human login and per-repo session connect/disconnect.
 
+Install (normal users, after publish):
+
+```bash
+npm install -g hexgrid-cli
+```
+
+Local dev install from repo:
+
 ```bash
 cd cli
 npm link
@@ -201,6 +209,13 @@ CLI session endpoints:
 - `POST /api/cli/heartbeat`
 - `POST /api/cli/disconnect`
 - `POST /api/cli/logout`
+
+CLI publish (maintainers):
+
+1. Ensure repo secret `NPM_TOKEN` is set (npm automation token).
+2. Bump `cli/package.json` version.
+3. Create and push tag `cli-v<version>` (example `cli-v0.1.0`).
+4. GitHub Action [`.github/workflows/publish-cli.yml`](/Users/jackpickard/Documents/repos/hexgrid/.github/workflows/publish-cli.yml) publishes `hexgrid-cli` to npm.
 
 ## GitHub Actions deploy
 
