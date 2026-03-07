@@ -76,6 +76,13 @@ jobs:
             exit 1
           fi
 
+      - name: Apply production D1 schema
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          bunx wrangler d1 execute hexgrid-db --config wrangler.toml --env production --file worker/src/db/schema.sql
+
       - name: Validate worker secrets
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}

@@ -192,3 +192,4 @@ Keep the placeholder in [wrangler.toml](/Users/jackpickard/Documents/repos/hexgr
 
 - `REPLACE_WITH_PROD_D1_DATABASE_ID` under `[env.production]`
 - CI injects real value during deploy from `CF_D1_DATABASE_ID_PROD`
+- CI applies [worker/src/db/schema.sql](/Users/jackpickard/Documents/repos/hexgrid/worker/src/db/schema.sql) to production D1 on each worker deploy
