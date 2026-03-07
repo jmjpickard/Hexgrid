@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "cli-v0.0.1"
+      - 'cli-v*'
 
 permissions:
   contents: read
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   publish-cli:
-    name: Publish hexgrid-cli to npm
+    name: Publish @jackpickard/hexgrid-cli to npm
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

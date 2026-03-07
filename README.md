@@ -171,7 +171,7 @@ Use the CLI to do reliable human login and per-repo session connect/disconnect.
 Install (normal users, after publish):
 
 ```bash
-npm install -g hexgrid-cli
+npm install -g @jackpickard/hexgrid-cli
 ```
 
 Local dev install from repo:
@@ -215,7 +215,7 @@ CLI publish (maintainers):
 1. Ensure repo secret `NPM_TOKEN` is set (npm automation token).
 2. Bump `cli/package.json` version.
 3. Create and push tag `cli-v<version>` (example `cli-v0.1.0`).
-4. GitHub Action [`.github/workflows/publish-cli.yml`](/Users/jackpickard/Documents/repos/hexgrid/.github/workflows/publish-cli.yml) publishes `hexgrid-cli` to npm.
+4. GitHub Action [`.github/workflows/publish-cli.yml`](/Users/jackpickard/Documents/repos/hexgrid/.github/workflows/publish-cli.yml) publishes `@jackpickard/hexgrid-cli` to npm.
 
 ## GitHub Actions deploy
 

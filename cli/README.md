@@ -1,11 +1,11 @@
-# hexgrid-cli
+# @jackpickard/hexgrid-cli
 
 HexGrid command line client for device login and repo session lifecycle.
 
 ## Install
 
 ```bash
-npm install -g hexgrid-cli
+npm install -g @jackpickard/hexgrid-cli
 ```
 
 ## Commands
@@ -33,4 +33,3 @@ hexgrid logout
 - `--runtime <name>` set session runtime tag (`claude`, `codex`, etc.)
 - `--name <name>` override generated session name
 - `--description <text>` override generated session description
-
