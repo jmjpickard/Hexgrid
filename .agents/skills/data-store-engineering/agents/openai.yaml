@@ -1,0 +1,4 @@
+interface:
+  display_name: "Data Store Engineering"
+  short_description: "Plan and ship SQL or NoSQL changes"
+  default_prompt: "Use $data-store-engineering to change schemas, queries, indexes, or data migration plans safely."

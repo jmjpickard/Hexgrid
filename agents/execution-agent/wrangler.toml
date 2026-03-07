@@ -1,0 +1,13 @@
+name = "hexgrid-execution-agent"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+HEXGRID_BASE_URL = "http://localhost:8787"
+OPENAI_MODEL = "gpt-5-mini"
+OPENAI_MAX_OUTPUT_TOKENS = "900"
+MAX_TASKS_PER_RUN = "3"
+
+[triggers]
+crons = ["*/1 * * * *"]

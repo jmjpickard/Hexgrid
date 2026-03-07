@@ -39,7 +39,7 @@ import {
 } from './db/queries'
 import { createMcpServer, createOnboardMcpServer } from './mcp'
 import { DOMAIN_COLOURS } from './lib/h3'
-import type { Domain, Env, HexRow, SessionUser } from './lib/types'
+import type { AgentAuthContext, Domain, Env, HexRow, SessionUser } from './lib/types'
 import {
   buildSessionClearCookie,
   buildSessionCookie,
@@ -194,6 +194,25 @@ async function requireOwnedHex(env: Env, user: SessionUser, hexId: string): Prom
   const hex = await getOwnedHexById(env.DB, hexId, user.email)
   if (!hex) throw new HttpError(403, 'Agent not owned by this user')
   return hex
+}
+
+async function requireAgentActor(request: Request, env: Env): Promise<AgentAuthContext> {
+  const token = getBearerToken(request)
+  if (!token) throw new HttpError(401, 'Missing bearer token')
+
+  const tokenHash = await sha256(token)
+  const apiKey = await getAgentApiKeyByHash(env.DB, tokenHash)
+  if (!apiKey) throw new HttpError(401, 'Invalid API key')
+
+  const scopes = parseJsonField<string[]>(apiKey.scopes, [])
+  await touchAgentApiKeyLastUsed(env.DB, apiKey.key_id, nowUnix())
+
+  return {
+    key_id: apiKey.key_id,
+    user_id: apiKey.user_id,
+    hex_id: apiKey.hex_id,
+    scopes,
+  }
 }
 
 function isProduction(env: Env): boolean {
@@ -529,6 +548,47 @@ export default {
         return Response.json(result, { headers: corsHeaders })
       } catch (err) {
         return Response.json({ error: errorMessage(err) }, { status: 400, headers: corsHeaders })
+      }
+    }
+
+    // Agent runtime REST wrappers (API-key auth)
+    if (url.pathname === '/api/agent/tasks/inbox' && request.method === 'GET') {
+      try {
+        const actor = await requireAgentActor(request, env)
+        const parsedLimit = Number(url.searchParams.get('limit') ?? '25')
+        const limit = Number.isFinite(parsedLimit) ? parsedLimit : 25
+        const result = await pollTasks({ limit }, env, actor)
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/agent/tasks/claim' && request.method === 'POST') {
+      try {
+        const actor = await requireAgentActor(request, env)
+        const body = claimTaskSchema.parse(await request.json())
+        const result = await claimTask({ task_id: body.task_id }, env, actor)
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/agent/tasks/complete' && request.method === 'POST') {
+      try {
+        const actor = await requireAgentActor(request, env)
+        const body = completeTaskSchema.parse(await request.json())
+        const result = await completeTask({
+          task_id: body.task_id,
+          result_summary: body.result_summary,
+        }, env, actor)
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
       }
     }
 

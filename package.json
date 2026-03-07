@@ -1,5 +1,5 @@
 {
   "name": "hexgrid",
   "private": true,
-  "workspaces": ["worker", "web"]
+  "workspaces": ["worker", "web", "agents/execution-agent"]
 }

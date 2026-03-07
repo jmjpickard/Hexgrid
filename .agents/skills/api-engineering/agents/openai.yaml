@@ -1,0 +1,4 @@
+interface:
+  display_name: "API Engineering"
+  short_description: "Design and implement service APIs"
+  default_prompt: "Use $api-engineering to design or change HTTP APIs and the service code behind them."

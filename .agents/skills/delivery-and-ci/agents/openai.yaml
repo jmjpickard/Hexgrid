@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delivery and CI"
+  short_description: "Tighten CI, testing, and deploy flow"
+  default_prompt: "Use $delivery-and-ci to improve CI gates, release safety, deployment setup, and rollback readiness."

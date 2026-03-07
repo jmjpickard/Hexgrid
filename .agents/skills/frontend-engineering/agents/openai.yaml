@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Engineering"
+  short_description: "Ship accessible frontend changes"
+  default_prompt: "Use $frontend-engineering to implement or refactor UI in this codebase with accessible, tested components."

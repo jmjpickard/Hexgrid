@@ -1,0 +1,4 @@
+interface:
+  display_name: "GraphQL Engineering"
+  short_description: "Ship safer, faster GraphQL changes"
+  default_prompt: "Use $graphql-engineering to design or modify GraphQL schemas, resolvers, and query performance."

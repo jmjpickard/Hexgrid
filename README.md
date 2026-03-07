@@ -164,6 +164,28 @@ Issue agent keys from `/api/agents/:hexId/keys`, then use:
 }
 ```
 
+## Agent runtime REST (API key)
+
+For standalone provider runtimes (outside MCP transport), use bearer auth with an agent key:
+
+- `GET /api/agent/tasks/inbox?limit=25`
+- `POST /api/agent/tasks/claim` with `{"task_id":"..."}`
+- `POST /api/agent/tasks/complete` with `{"task_id":"...","result_summary":"..."}`
+
+Required scopes:
+- `poll_tasks`
+- `claim_task`
+- `complete_task`
+
+## Execution agent worker (v1)
+
+Production-ready scaffold is in:
+
+- [`agents/execution-agent/src/index.ts`](/Users/jackpickard/Documents/repos/hexgrid/agents/execution-agent/src/index.ts)
+- [`docs/execution-agent.md`](/Users/jackpickard/Documents/repos/hexgrid/docs/execution-agent.md)
+
+It polls tasks, claims them, calls OpenAI Responses (optionally through Cloudflare AI Gateway), and completes tasks automatically.
+
 ## GitHub Actions deploy
 
 Workflow file:
