@@ -179,6 +179,8 @@ Required GitHub repository secrets:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
+- `RESEND_API_KEY`
+- `AUTH_FROM_EMAIL` (example: `HexGrid <auth@info.hexgrid.app>`)
 
 Required GitHub repository variable:
 
