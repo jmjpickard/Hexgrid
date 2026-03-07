@@ -90,7 +90,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          RESULT="$(bunx wrangler d1 execute hexgrid-db --config wrangler.toml --env production --remote --command \"SELECT name FROM sqlite_master WHERE type='table' AND name='users';\" --json)"
+          RESULT="$(bunx wrangler d1 execute hexgrid-db --config wrangler.toml --env production --remote --command "SELECT name FROM sqlite_master WHERE type='table' AND name='users';" --json)"
           echo "$RESULT"
           if ! echo "$RESULT" | grep -q '"users"'; then
             echo "users table missing in production D1 after schema apply"
