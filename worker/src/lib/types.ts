@@ -2,6 +2,7 @@
 
 export type SessionStatus = 'active' | 'disconnected'
 export type MessageStatus = 'pending' | 'answered' | 'expired'
+export type DeviceAuthStatus = 'pending' | 'approved' | 'consumed'
 
 // ─── DATABASE ROWS ────────────────────────────────────────────────────────────
 
@@ -28,6 +29,29 @@ export interface WebSessionRow {
   token_hash: string
   expires_at: number
   created_at: number
+  revoked_at: number | null
+}
+
+export interface DeviceAuthRequestRow {
+  device_code: string
+  user_code: string
+  user_id: string | null
+  client_name: string | null
+  status: DeviceAuthStatus
+  created_at: number
+  expires_at: number
+  approved_at: number | null
+  consumed_at: number | null
+}
+
+export interface CliTokenRow {
+  token_id: string
+  user_id: string
+  token_hash: string
+  token_prefix: string
+  created_at: number
+  expires_at: number | null
+  last_used_at: number | null
   revoked_at: number | null
 }
 

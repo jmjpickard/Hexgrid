@@ -3,7 +3,9 @@
 import type {
   AgentSessionRow,
   AuthCodeRow,
+  CliTokenRow,
   ConnectionRow,
+  DeviceAuthRequestRow,
   KnowledgeRow,
   MessageRow,
   SessionUser,
@@ -109,6 +111,141 @@ export async function getSessionUserByTokenHash(
 export async function revokeSessionByTokenHash(db: D1Database, tokenHash: string, revokedAt: number): Promise<void> {
   await db
     .prepare('UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
+    .bind(revokedAt, tokenHash)
+    .run()
+}
+
+export async function createDeviceAuthRequest(
+  db: D1Database,
+  request: DeviceAuthRequestRow,
+): Promise<void> {
+  await db
+    .prepare(`
+      INSERT INTO device_auth_requests (
+        device_code, user_code, user_id, client_name, status,
+        created_at, expires_at, approved_at, consumed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .bind(
+      request.device_code,
+      request.user_code,
+      request.user_id,
+      request.client_name,
+      request.status,
+      request.created_at,
+      request.expires_at,
+      request.approved_at,
+      request.consumed_at,
+    )
+    .run()
+}
+
+export async function getDeviceAuthRequestByDeviceCode(
+  db: D1Database,
+  deviceCode: string,
+): Promise<DeviceAuthRequestRow | null> {
+  const result = await db
+    .prepare('SELECT * FROM device_auth_requests WHERE device_code = ?')
+    .bind(deviceCode)
+    .first<DeviceAuthRequestRow>()
+  return result ?? null
+}
+
+export async function getDeviceAuthRequestByUserCode(
+  db: D1Database,
+  userCode: string,
+): Promise<DeviceAuthRequestRow | null> {
+  const result = await db
+    .prepare('SELECT * FROM device_auth_requests WHERE user_code = ?')
+    .bind(userCode)
+    .first<DeviceAuthRequestRow>()
+  return result ?? null
+}
+
+export async function approveDeviceAuthRequest(
+  db: D1Database,
+  userCode: string,
+  userId: string,
+  now: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(`
+      UPDATE device_auth_requests
+      SET status = 'approved', user_id = ?, approved_at = ?
+      WHERE user_code = ? AND status = 'pending' AND expires_at > ?
+    `)
+    .bind(userId, now, userCode, now)
+    .run()
+  return (result.meta?.changes ?? 0) > 0
+}
+
+export async function consumeDeviceAuthRequest(
+  db: D1Database,
+  deviceCode: string,
+  now: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(`
+      UPDATE device_auth_requests
+      SET status = 'consumed', consumed_at = ?
+      WHERE device_code = ? AND status = 'approved' AND expires_at > ?
+    `)
+    .bind(now, deviceCode, now)
+    .run()
+  return (result.meta?.changes ?? 0) > 0
+}
+
+export async function createCliToken(db: D1Database, token: CliTokenRow): Promise<void> {
+  await db
+    .prepare(`
+      INSERT INTO cli_tokens (
+        token_id, user_id, token_hash, token_prefix,
+        created_at, expires_at, last_used_at, revoked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .bind(
+      token.token_id,
+      token.user_id,
+      token.token_hash,
+      token.token_prefix,
+      token.created_at,
+      token.expires_at,
+      token.last_used_at,
+      token.revoked_at,
+    )
+    .run()
+}
+
+export async function getSessionUserByCliTokenHash(
+  db: D1Database,
+  tokenHash: string,
+  now: number,
+): Promise<SessionUser | null> {
+  const result = await db
+    .prepare(`
+      SELECT u.user_id, u.email, u.email_verified_at
+      FROM cli_tokens t
+      INNER JOIN users u ON u.user_id = t.user_id
+      WHERE t.token_hash = ?
+        AND t.revoked_at IS NULL
+        AND (t.expires_at IS NULL OR t.expires_at > ?)
+      LIMIT 1
+    `)
+    .bind(tokenHash, now)
+    .first<SessionUser>()
+  return result ?? null
+}
+
+export async function touchCliToken(db: D1Database, tokenHash: string, now: number): Promise<void> {
+  await db
+    .prepare('UPDATE cli_tokens SET last_used_at = ? WHERE token_hash = ?')
+    .bind(now, tokenHash)
+    .run()
+}
+
+export async function revokeCliTokenByHash(db: D1Database, tokenHash: string, revokedAt: number): Promise<void> {
+  await db
+    .prepare('UPDATE cli_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
     .bind(revokedAt, tokenHash)
     .run()
 }

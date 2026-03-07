@@ -164,6 +164,44 @@ Issue agent keys from `/api/agents/:hexId/keys`, then use:
 }
 ```
 
+## HexGrid CLI (recommended for session lifecycle)
+
+Use the CLI to do reliable human login and per-repo session connect/disconnect.
+
+```bash
+cd cli
+npm link
+```
+
+Then in any repo:
+
+```bash
+# one-time per machine (opens browser to approve on /device)
+hexgrid login
+
+# connect this repo session (metadata auto-detected)
+hexgrid connect --runtime claude
+# or
+hexgrid connect --runtime codex
+
+# keep alive / stop
+hexgrid heartbeat
+hexgrid disconnect
+```
+
+Device-flow endpoints used by CLI:
+
+- `POST /auth/device/start`
+- `POST /auth/device/approve`
+- `POST /auth/device/poll`
+
+CLI session endpoints:
+
+- `POST /api/cli/connect`
+- `POST /api/cli/heartbeat`
+- `POST /api/cli/disconnect`
+- `POST /api/cli/logout`
+
 ## GitHub Actions deploy
 
 Workflow file:

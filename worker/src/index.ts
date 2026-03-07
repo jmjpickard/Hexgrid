@@ -3,22 +3,31 @@
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
 import {
+  approveDeviceAuthRequest,
+  consumeDeviceAuthRequest,
+  createCliToken,
+  createDeviceAuthRequest,
   createUser,
   createWebSession,
   decrementAuthCodeAttempts,
   deleteAuthCode,
   getAccountStats,
   getAuthCodeByEmail,
+  getDeviceAuthRequestByDeviceCode,
+  getDeviceAuthRequestByUserCode,
   getConnectionsForAccount,
   getRecentMessages,
+  getSessionUserByCliTokenHash,
   getSessionUserByTokenHash,
   getUserByAccountApiKeyHash,
   getUserByEmail,
   listAllSessions,
   listKnowledge,
   markUserEmailVerified,
+  revokeCliTokenByHash,
   revokeSessionByTokenHash,
   setAccountApiKey,
+  touchCliToken,
   upsertAuthCode,
 } from './db/queries'
 import { createMcpServer } from './mcp'
@@ -36,6 +45,14 @@ import {
 } from './lib/auth'
 import { sendOtpEmail } from './lib/email'
 import { isValidEmail } from './lib/sanitise'
+import {
+  connectSession,
+  connectSessionSchema,
+  disconnect,
+  disconnectSchema,
+  heartbeat,
+  heartbeatSchema,
+} from './tools/session'
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -52,6 +69,9 @@ class HttpError extends Error {
 const OTP_TTL_SECONDS = 10 * 60
 const OTP_ATTEMPTS = 5
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+const DEVICE_CODE_TTL_SECONDS = 10 * 60
+const DEVICE_POLL_INTERVAL_SECONDS = 3
+const CLI_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 90
 
 const authStartSchema = z.object({
   email: z.string().min(3).max(200),
@@ -62,8 +82,30 @@ const authVerifySchema = z.object({
   code: z.string().min(4).max(12),
 })
 
+const deviceAuthStartSchema = z.object({
+  client_name: z.string().min(1).max(100).optional(),
+})
+
+const deviceAuthApproveSchema = z.object({
+  user_code: z.string().min(4).max(20),
+})
+
+const deviceAuthPollSchema = z.object({
+  device_code: z.string().min(10).max(300),
+})
+
 function normaliseEmail(input: string): string {
   return input.trim().toLowerCase()
+}
+
+function normaliseUserCode(input: string): string {
+  return input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+}
+
+function generateUserCode(length = 8): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(length))
+  return Array.from(bytes, b => alphabet[b % alphabet.length]).join('')
 }
 
 function allowedOrigins(env: Env): string[] {
@@ -99,6 +141,26 @@ async function requireSessionUser(request: Request, env: Env): Promise<SessionUs
   if (!user) throw new HttpError(401, 'Invalid or expired session')
   if (!user.email_verified_at) throw new HttpError(403, 'Email not verified')
   return user
+}
+
+async function requireCliUser(
+  request: Request,
+  env: Env,
+  touchUsage = true,
+): Promise<{ user: SessionUser; tokenHash: string }> {
+  const token = getBearerToken(request)
+  if (!token) throw new HttpError(401, 'Missing bearer token')
+
+  const tokenHash = await sha256(token)
+  const user = await getSessionUserByCliTokenHash(env.DB, tokenHash, nowUnix())
+  if (!user) throw new HttpError(401, 'Invalid or expired CLI token')
+  if (!user.email_verified_at) throw new HttpError(403, 'Email not verified')
+
+  if (touchUsage) {
+    await touchCliToken(env.DB, tokenHash, nowUnix())
+  }
+
+  return { user, tokenHash }
 }
 
 function isProduction(env: Env): boolean {
@@ -221,6 +283,143 @@ export default {
       }
     }
 
+    if (url.pathname === '/auth/device/start' && request.method === 'POST') {
+      try {
+        const raw = await request.text()
+        const body = deviceAuthStartSchema.parse(raw ? JSON.parse(raw) : {})
+        const now = nowUnix()
+
+        let attempts = 0
+        let deviceCode = ''
+        let userCode = ''
+
+        while (attempts < 5) {
+          attempts += 1
+          deviceCode = `hgd_${generateToken(24)}`
+          userCode = generateUserCode(8)
+
+          try {
+            await createDeviceAuthRequest(env.DB, {
+              device_code: deviceCode,
+              user_code: userCode,
+              user_id: null,
+              client_name: body.client_name ?? null,
+              status: 'pending',
+              created_at: now,
+              expires_at: now + DEVICE_CODE_TTL_SECONDS,
+              approved_at: null,
+              consumed_at: null,
+            })
+            break
+          } catch (err) {
+            if (attempts >= 5) throw err
+          }
+        }
+
+        if (!deviceCode || !userCode) throw new Error('Failed to create device auth request')
+
+        const appUrl = (env.APP_URL ?? 'https://hexgrid.app').replace(/\/+$/, '')
+        const verificationUri = `${appUrl}/device`
+
+        return jsonResponse({
+          device_code: deviceCode,
+          user_code: userCode,
+          verification_uri: verificationUri,
+          verification_uri_complete: `${verificationUri}?code=${encodeURIComponent(userCode)}`,
+          expires_in_seconds: DEVICE_CODE_TTL_SECONDS,
+          interval_seconds: DEVICE_POLL_INTERVAL_SECONDS,
+        })
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/auth/device/approve' && request.method === 'POST') {
+      try {
+        const sessionUser = await requireSessionUser(request, env)
+        const body = deviceAuthApproveSchema.parse(await request.json())
+        const userCode = normaliseUserCode(body.user_code)
+        const now = nowUnix()
+
+        const authRequest = await getDeviceAuthRequestByUserCode(env.DB, userCode)
+        if (!authRequest) throw new HttpError(404, 'Device code not found')
+        if (authRequest.expires_at < now) throw new HttpError(400, 'Device code expired')
+        if (authRequest.status === 'consumed') throw new HttpError(400, 'Device code already used')
+
+        if (authRequest.status === 'approved') {
+          if (authRequest.user_id !== sessionUser.user_id) {
+            throw new HttpError(409, 'Device code already approved by another user')
+          }
+          return jsonResponse({ ok: true, status: 'approved' })
+        }
+
+        const approved = await approveDeviceAuthRequest(env.DB, userCode, sessionUser.user_id, now)
+        if (!approved) throw new HttpError(400, 'Unable to approve device code')
+
+        return jsonResponse({ ok: true, status: 'approved' })
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/auth/device/poll' && request.method === 'POST') {
+      try {
+        const body = deviceAuthPollSchema.parse(await request.json())
+        const now = nowUnix()
+        const authRequest = await getDeviceAuthRequestByDeviceCode(env.DB, body.device_code.trim())
+
+        if (!authRequest) throw new HttpError(404, 'Invalid device code')
+        if (authRequest.expires_at < now) throw new HttpError(400, 'Device code expired')
+
+        if (authRequest.status === 'pending') {
+          return jsonResponse({
+            status: 'pending',
+            interval_seconds: DEVICE_POLL_INTERVAL_SECONDS,
+            expires_in_seconds: Math.max(0, authRequest.expires_at - now),
+          })
+        }
+
+        if (authRequest.status === 'consumed') {
+          throw new HttpError(400, 'Device code already used')
+        }
+
+        if (!authRequest.user_id) {
+          throw new HttpError(400, 'Approved device code is missing user association')
+        }
+
+        const consumed = await consumeDeviceAuthRequest(env.DB, authRequest.device_code, now)
+        if (!consumed) {
+          throw new HttpError(409, 'Device code could not be consumed')
+        }
+
+        const plaintextToken = `hgt_${generateToken(24)}`
+        const tokenHash = await sha256(plaintextToken)
+
+        await createCliToken(env.DB, {
+          token_id: crypto.randomUUID(),
+          user_id: authRequest.user_id,
+          token_hash: tokenHash,
+          token_prefix: keyPrefix(plaintextToken),
+          created_at: now,
+          expires_at: now + CLI_TOKEN_TTL_SECONDS,
+          last_used_at: null,
+          revoked_at: null,
+        })
+
+        return jsonResponse({
+          access_token: plaintextToken,
+          token_type: 'Bearer',
+          expires_in_seconds: CLI_TOKEN_TTL_SECONDS,
+          account_id: authRequest.user_id,
+        })
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
     // ── REST API for web dashboard ──────────────────────────────────────────────
 
     // GET /api/me
@@ -311,6 +510,64 @@ export default {
         return jsonResponse(stats)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    // ── CLI API (Bearer token auth via /auth/device/* flow) ──────────────────
+    if (url.pathname === '/api/cli/me' && request.method === 'GET') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        return jsonResponse({ user_id: user.user_id, email: user.email })
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 401
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/connect' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = connectSessionSchema.parse(await request.json())
+        const result = await connectSession(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/heartbeat' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = heartbeatSchema.parse(await request.json())
+        const result = await heartbeat(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/disconnect' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = disconnectSchema.parse(await request.json())
+        const result = await disconnect(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/logout' && request.method === 'POST') {
+      try {
+        const { tokenHash } = await requireCliUser(request, env, false)
+        await revokeCliTokenByHash(env.DB, tokenHash, nowUnix())
+        return jsonResponse({ ok: true })
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 401
         return jsonResponse({ error: errorMessage(err) }, status)
       }
     }

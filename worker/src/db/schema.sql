@@ -37,6 +37,37 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
+CREATE TABLE IF NOT EXISTS device_auth_requests (
+  device_code      TEXT PRIMARY KEY,
+  user_code        TEXT UNIQUE NOT NULL,
+  user_id          TEXT,
+  client_name      TEXT,
+  status           TEXT NOT NULL DEFAULT 'pending',
+  created_at       INTEGER NOT NULL,
+  expires_at       INTEGER NOT NULL,
+  approved_at      INTEGER,
+  consumed_at      INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_auth_user_code ON device_auth_requests(user_code);
+CREATE INDEX IF NOT EXISTS idx_device_auth_status ON device_auth_requests(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS cli_tokens (
+  token_id         TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL,
+  token_hash       TEXT UNIQUE NOT NULL,
+  token_prefix     TEXT NOT NULL,
+  created_at       INTEGER NOT NULL,
+  expires_at       INTEGER,
+  last_used_at     INTEGER,
+  revoked_at       INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cli_tokens_user ON cli_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_cli_tokens_expires ON cli_tokens(expires_at);
+
 -- ─── AGENT SESSIONS ──────────────────────────────────────────────────────────
 -- Live agent connections. One row per connected Claude Code / MCP client.
 
