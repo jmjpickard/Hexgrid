@@ -9,6 +9,10 @@ import process from 'node:process'
 const DEFAULT_API_URL = process.env.HEXGRID_API_URL ?? 'https://api.hexgrid.app'
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'hexgrid', 'config.json')
 const TOOL_CANDIDATES = ['git', 'rg', 'npm', 'pnpm', 'bun', 'yarn', 'docker', 'pytest', 'go', 'cargo', 'node', 'python3']
+const CLI_PACKAGE_NAME = '@jackpickard/hexgrid-cli'
+const DEFAULT_HEARTBEAT_SECONDS = 300
+const HEXGRID_CODEX_BLOCK_START = '# BEGIN HEXGRID MCP (managed by hexgrid)'
+const HEXGRID_CODEX_BLOCK_END = '# END HEXGRID MCP (managed by hexgrid)'
 
 async function fileExists(filePath) {
   try {
@@ -35,11 +39,20 @@ function usage() {
 
 Usage:
   hexgrid login [--api-url URL] [--no-open] [--client-name NAME]
+  hexgrid setup [all|codex|claude]
+  hexgrid doctor [all|codex|claude] [--fix]
   hexgrid connect [--runtime RUNTIME] [--name NAME] [--description TEXT]
+  hexgrid run <codex|claude> [--name NAME] [--description TEXT] [--heartbeat-seconds N] [-- ...agent args]
   hexgrid heartbeat [SESSION_ID]
   hexgrid disconnect [SESSION_ID]
+  hexgrid sessions
+  hexgrid ask --to TARGET [--question TEXT] [--session SESSION_ID]
+  hexgrid inbox [SESSION_ID]
+  hexgrid reply --message MESSAGE_ID --answer TEXT [--session SESSION_ID]
+  hexgrid response MESSAGE_ID
   hexgrid me
   hexgrid logout
+  hexgrid update
 `)
 }
 
@@ -51,6 +64,58 @@ function parseFlag(args, name, fallback = null) {
 
 function hasFlag(args, name) {
   return args.includes(name)
+}
+
+function firstPositional(args) {
+  return args.find(arg => !arg.startsWith('-')) ?? null
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+function splitPassthroughArgs(args) {
+  const idx = args.indexOf('--')
+  if (idx === -1) return { primary: args, passthrough: [] }
+  return {
+    primary: args.slice(0, idx),
+    passthrough: args.slice(idx + 1),
+  }
+}
+
+function mcpUrlFromApiUrl(apiUrl) {
+  return `${apiUrl.replace(/\/+$/, '')}/mcp`
+}
+
+function parseRuntime(input, { allowAll = false, fallback = null } = {}) {
+  if (!input) return fallback
+  const value = input.trim().toLowerCase()
+  if (value === 'codex' || value === 'claude') return value
+  if (allowAll && value === 'all') return value
+  throw new Error(`Unsupported runtime "${input}". Use codex${allowAll ? ', claude, all' : ' or claude'}.`)
+}
+
+function parseRuntimes(primaryArgs, fallback = 'all') {
+  const runtimeValue = parseRuntime(firstPositional(primaryArgs), { allowAll: true, fallback })
+  if (runtimeValue === 'all') return ['codex', 'claude']
+  return [runtimeValue]
+}
+
+function parsePositiveInt(input, fallback) {
+  if (input == null) return fallback
+  const value = Number.parseInt(String(input), 10)
+  if (!Number.isFinite(value) || value <= 0) return fallback
+  return value
+}
+
+function renderCodexHexgridBlock(mcpUrl) {
+  return [
+    HEXGRID_CODEX_BLOCK_START,
+    '[mcp_servers.hexgrid]',
+    `url = "${mcpUrl}"`,
+    'bearer_token_env_var = "HEXGRID_API_KEY"',
+    HEXGRID_CODEX_BLOCK_END,
+  ].join('\n')
 }
 
 async function requestJson(apiUrl, endpoint, options = {}) {
@@ -112,6 +177,12 @@ function commandExists(command) {
   return result.status === 0
 }
 
+function readJsonMaybe(filePath) {
+  return readFile(filePath, 'utf8')
+    .then(raw => JSON.parse(raw))
+    .catch(() => null)
+}
+
 async function detectRepoContext() {
   const repoRoot = runGit(['rev-parse', '--show-toplevel']) ?? process.cwd()
   const repoName = path.basename(repoRoot)
@@ -141,6 +212,155 @@ function resolveApiUrl(args, config) {
 
 function resolveToken(config) {
   return process.env.HEXGRID_TOKEN ?? config.access_token ?? null
+}
+
+async function assertApiHealthy(apiUrl) {
+  const { response } = await requestJson(apiUrl, '/health', { method: 'GET' })
+  if (!response.ok) {
+    throw new Error(`API health check failed (${response.status}) for ${apiUrl}`)
+  }
+}
+
+async function assertLoggedIn(apiUrl, token) {
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  const me = await requestJson(apiUrl, '/api/cli/me', {
+    method: 'GET',
+    token,
+  })
+  if (!me.response.ok) {
+    throw new Error(me.data.error ?? `Authentication failed (${me.response.status}). Run \`hexgrid login\` again.`)
+  }
+  return me.data
+}
+
+async function ensureCodexSetup(repoRoot, mcpUrl) {
+  const codexDir = path.join(repoRoot, '.codex')
+  const codexConfigPath = path.join(codexDir, 'config.toml')
+  const block = renderCodexHexgridBlock(mcpUrl)
+
+  await mkdir(codexDir, { recursive: true })
+
+  let nextContent = block
+  if (await fileExists(codexConfigPath)) {
+    const current = await readFile(codexConfigPath, 'utf8')
+    const escapedStart = HEXGRID_CODEX_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const escapedEnd = HEXGRID_CODEX_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const managedRegex = new RegExp(`${escapedStart}[\\s\\S]*?${escapedEnd}`, 'm')
+
+    if (managedRegex.test(current)) {
+      nextContent = current.replace(managedRegex, block)
+    } else {
+      nextContent = `${current.trimEnd()}\n\n${block}\n`
+    }
+  } else {
+    nextContent = `${block}\n`
+  }
+
+  await writeFile(codexConfigPath, nextContent)
+  return codexConfigPath
+}
+
+async function ensureClaudeSetup(repoRoot, mcpUrl, token) {
+  const mcpPath = path.join(repoRoot, '.mcp.json')
+  const claudeDir = path.join(repoRoot, '.claude')
+  const claudeSettingsPath = path.join(claudeDir, 'settings.local.json')
+
+  const mcpConfig = (await readJsonMaybe(mcpPath)) ?? {}
+  if (!mcpConfig.mcpServers || typeof mcpConfig.mcpServers !== 'object') {
+    mcpConfig.mcpServers = {}
+  }
+
+  mcpConfig.mcpServers.hexgrid = {
+    type: 'streamable-http',
+    url: mcpUrl,
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  }
+  await writeFile(mcpPath, `${JSON.stringify(mcpConfig, null, 2)}\n`)
+
+  await mkdir(claudeDir, { recursive: true })
+  const claudeSettings = (await readJsonMaybe(claudeSettingsPath)) ?? {}
+  const enabled = Array.isArray(claudeSettings.enabledMcpjsonServers)
+    ? claudeSettings.enabledMcpjsonServers.filter(item => typeof item === 'string')
+    : []
+
+  if (!enabled.includes('hexgrid')) {
+    enabled.push('hexgrid')
+  }
+
+  claudeSettings.enabledMcpjsonServers = enabled
+  claudeSettings.enableAllProjectMcpServers = true
+
+  await writeFile(claudeSettingsPath, `${JSON.stringify(claudeSettings, null, 2)}\n`)
+  return { mcpPath, claudeSettingsPath }
+}
+
+async function setupRuntimes({ runtimes, repoRoot, apiUrl, token }) {
+  const mcpUrl = mcpUrlFromApiUrl(apiUrl)
+  const result = {}
+
+  for (const runtime of runtimes) {
+    if (runtime === 'codex') {
+      const codexConfigPath = await ensureCodexSetup(repoRoot, mcpUrl)
+      result.codex = { ok: true, config_path: codexConfigPath }
+      continue
+    }
+
+    if (runtime === 'claude') {
+      const claudeFiles = await ensureClaudeSetup(repoRoot, mcpUrl, token)
+      result.claude = { ok: true, ...claudeFiles }
+    }
+  }
+
+  return result
+}
+
+async function inspectRuntimeSetup(runtime, repoRoot, apiUrl) {
+  const mcpUrl = mcpUrlFromApiUrl(apiUrl)
+
+  if (runtime === 'codex') {
+    const codexConfigPath = path.join(repoRoot, '.codex', 'config.toml')
+    if (!(await fileExists(codexConfigPath))) {
+      return { ok: false, reason: `missing ${codexConfigPath}` }
+    }
+    const content = await readFile(codexConfigPath, 'utf8')
+    const ok = content.includes('[mcp_servers.hexgrid]')
+      && content.includes(`url = "${mcpUrl}"`)
+      && content.includes('bearer_token_env_var = "HEXGRID_API_KEY"')
+    return ok
+      ? { ok: true, config_path: codexConfigPath }
+      : { ok: false, reason: 'hexgrid MCP block missing or stale in .codex/config.toml' }
+  }
+
+  if (runtime === 'claude') {
+    const mcpPath = path.join(repoRoot, '.mcp.json')
+    const claudeSettingsPath = path.join(repoRoot, '.claude', 'settings.local.json')
+    const mcp = await readJsonMaybe(mcpPath)
+    const settings = await readJsonMaybe(claudeSettingsPath)
+
+    const mcpOk = Boolean(
+      mcp?.mcpServers?.hexgrid
+      && mcp.mcpServers.hexgrid.url === mcpUrl
+      && typeof mcp.mcpServers.hexgrid.headers?.Authorization === 'string'
+      && mcp.mcpServers.hexgrid.headers.Authorization.startsWith('Bearer '),
+    )
+    const settingsOk = Boolean(
+      settings
+      && Array.isArray(settings.enabledMcpjsonServers)
+      && settings.enabledMcpjsonServers.includes('hexgrid')
+      && settings.enableAllProjectMcpServers === true,
+    )
+
+    if (mcpOk && settingsOk) {
+      return { ok: true, mcp_path: mcpPath, claude_settings_path: claudeSettingsPath }
+    }
+
+    return { ok: false, reason: 'missing or stale .mcp.json / .claude/settings.local.json HexGrid config' }
+  }
+
+  return { ok: false, reason: `unsupported runtime ${runtime}` }
 }
 
 async function commandLogin(args) {
@@ -223,21 +443,7 @@ function sessionKey(repoRoot) {
   return path.resolve(repoRoot)
 }
 
-async function commandConnect(args) {
-  const config = await loadConfig()
-  const apiUrl = resolveApiUrl(args, config)
-  const token = resolveToken(config)
-  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
-
-  const runtime = parseFlag(args, '--runtime', 'cli')
-  const context = await detectRepoContext()
-  const name = parseFlag(args, '--name', `${context.repoName}-${runtime}`)
-  const description = parseFlag(
-    args,
-    '--description',
-    `${runtime} session for ${context.repoName} (${context.repoType})`,
-  )
-
+async function connectRepoSession({ config, apiUrl, token, context, runtime, name, description }) {
   const capabilities = [
     `repo:${context.repoName}`,
     `surface:${context.repoType}`,
@@ -277,17 +483,322 @@ async function commandConnect(args) {
     last_session_id: connect.data.session_id,
   })
 
+  return connect.data
+}
+
+async function disconnectRepoSession({ config, apiUrl, token, sessionId, repoRoot }) {
+  const disconnect = await requestJson(apiUrl, '/api/cli/disconnect', {
+    method: 'POST',
+    token,
+    body: { session_id: sessionId },
+  })
+
+  if (!disconnect.response.ok) {
+    throw new Error(disconnect.data.error ?? `Disconnect failed (${disconnect.response.status})`)
+  }
+
+  const sessions = { ...(config.sessions ?? {}) }
+  const key = sessionKey(repoRoot)
+  if (sessions[key]?.session_id === sessionId) delete sessions[key]
+
+  await saveConfig({
+    ...config,
+    sessions,
+    last_session_id: config.last_session_id === sessionId ? null : config.last_session_id,
+  })
+
+  return disconnect.data
+}
+
+async function commandSetup(args) {
+  const { primary } = splitPassthroughArgs(args)
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(primary, config)
+  const token = resolveToken(config)
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  await assertApiHealthy(apiUrl)
+  await assertLoggedIn(apiUrl, token)
+
+  const runtimes = parseRuntimes(primary, 'all')
+  const context = await detectRepoContext()
+  const setupResult = await setupRuntimes({
+    runtimes,
+    repoRoot: context.repoRoot,
+    apiUrl,
+    token,
+  })
+
   console.log(JSON.stringify({
-    session_id: connect.data.session_id,
-    hex_id: connect.data.hex_id,
-    active_sessions: connect.data.active_sessions?.length ?? 0,
+    ok: true,
+    api_url: apiUrl,
+    repo: context.repoName,
+    runtimes,
+    setup: setupResult,
+  }, null, 2))
+}
+
+async function commandDoctor(args) {
+  const { primary } = splitPassthroughArgs(args)
+  const shouldFix = hasFlag(primary, '--fix')
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(primary, config)
+  const token = resolveToken(config)
+  const runtimes = parseRuntimes(primary, 'all')
+  const context = await detectRepoContext()
+  const checks = []
+
+  if (shouldFix) {
+    if (token) {
+      try {
+        await setupRuntimes({
+          runtimes,
+          repoRoot: context.repoRoot,
+          apiUrl,
+          token,
+        })
+        checks.push({ check: 'auto_fix', ok: true, detail: 'Applied runtime setup fixes' })
+      } catch (err) {
+        checks.push({ check: 'auto_fix', ok: false, detail: String(err instanceof Error ? err.message : err) })
+      }
+    } else {
+      checks.push({ check: 'auto_fix', ok: false, detail: 'Skipped --fix because CLI login token is missing' })
+    }
+  }
+
+  try {
+    await assertApiHealthy(apiUrl)
+    checks.push({ check: 'api_health', ok: true, detail: apiUrl })
+  } catch (err) {
+    checks.push({ check: 'api_health', ok: false, detail: String(err instanceof Error ? err.message : err) })
+  }
+
+  if (token) {
+    try {
+      const me = await assertLoggedIn(apiUrl, token)
+      checks.push({ check: 'cli_auth', ok: true, detail: me.email ?? me.user_id ?? 'authenticated' })
+    } catch (err) {
+      checks.push({ check: 'cli_auth', ok: false, detail: String(err instanceof Error ? err.message : err) })
+    }
+  } else {
+    checks.push({ check: 'cli_auth', ok: false, detail: 'Missing CLI token. Run `hexgrid login`.' })
+  }
+
+  checks.push({
+    check: 'repo_context',
+    ok: Boolean(context.repoRoot && context.repoName),
+    detail: context.repoRoot,
+  })
+
+  for (const runtime of runtimes) {
+    const hasBinary = commandExists(runtime)
+    checks.push({
+      check: `runtime_binary:${runtime}`,
+      ok: hasBinary,
+      detail: hasBinary ? `${runtime} found` : `${runtime} not found in PATH`,
+    })
+
+    const setupState = await inspectRuntimeSetup(runtime, context.repoRoot, apiUrl)
+    checks.push({
+      check: `runtime_setup:${runtime}`,
+      ok: setupState.ok,
+      detail: setupState.ok ? JSON.stringify(setupState) : setupState.reason,
+    })
+  }
+
+  const ok = checks.every(item => item.ok)
+  console.log(JSON.stringify({
+    ok,
+    api_url: apiUrl,
+    runtimes,
+    repo: context.repoName,
+    checks,
+  }, null, 2))
+
+  if (!ok) process.exitCode = 1
+}
+
+async function commandConnect(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  await assertLoggedIn(apiUrl, token)
+
+  const runtime = parseFlag(args, '--runtime', 'cli')
+  const context = await detectRepoContext()
+  const name = parseFlag(args, '--name', `${context.repoName}-${runtime}`)
+  const description = parseFlag(
+    args,
+    '--description',
+    `${runtime} session for ${context.repoName} (${context.repoType})`,
+  )
+
+  const connected = await connectRepoSession({
+    config,
+    apiUrl,
+    token,
+    context,
+    runtime,
+    name,
+    description,
+  })
+
+  console.log(JSON.stringify({
+    session_id: connected.session_id,
+    hex_id: connected.hex_id,
+    active_sessions: connected.active_sessions?.length ?? 0,
     repo: context.repoName,
     runtime,
   }, null, 2))
 }
 
+async function commandRun(args) {
+  const { primary, passthrough } = splitPassthroughArgs(args)
+  const runtime = parseRuntime(firstPositional(primary), { allowAll: false })
+  if (!runtime) {
+    throw new Error('Missing runtime. Use `hexgrid run codex` or `hexgrid run claude`.')
+  }
+
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(primary, config)
+  const token = resolveToken(config)
+  await assertApiHealthy(apiUrl)
+  await assertLoggedIn(apiUrl, token)
+
+  const context = await detectRepoContext()
+  await setupRuntimes({
+    runtimes: [runtime],
+    repoRoot: context.repoRoot,
+    apiUrl,
+    token,
+  })
+
+  const name = parseFlag(primary, '--name', `${context.repoName}-${runtime}`)
+  const description = parseFlag(
+    primary,
+    '--description',
+    `${runtime} session for ${context.repoName} (${context.repoType})`,
+  )
+  const heartbeatSeconds = parsePositiveInt(parseFlag(primary, '--heartbeat-seconds', null), DEFAULT_HEARTBEAT_SECONDS)
+
+  const connected = await connectRepoSession({
+    config,
+    apiUrl,
+    token,
+    context,
+    runtime,
+    name,
+    description,
+  })
+  const sessionId = connected.session_id
+
+  console.log(JSON.stringify({
+    ok: true,
+    runtime,
+    repo: context.repoName,
+    session_id: sessionId,
+    hex_id: connected.hex_id,
+    heartbeat_seconds: heartbeatSeconds,
+  }, null, 2))
+
+  let heartbeatTimer = null
+  let heartbeatBusy = false
+  let signalTriggered = false
+  let child
+  const childEnv = {
+    ...process.env,
+    HEXGRID_API_KEY: token,
+    HEXGRID_API_URL: apiUrl,
+    HEXGRID_SESSION_ID: sessionId,
+  }
+
+  const startHeartbeat = () => {
+    heartbeatTimer = setInterval(async () => {
+      if (heartbeatBusy) return
+      heartbeatBusy = true
+      try {
+        const hb = await requestJson(apiUrl, '/api/cli/heartbeat', {
+          method: 'POST',
+          token,
+          body: { session_id: sessionId },
+        })
+        if (!hb.response.ok) {
+          const detail = hb.data?.error ?? `status=${hb.response.status}`
+          console.error(`Warning: heartbeat failed (${detail})`)
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err)
+        console.error(`Warning: heartbeat error (${detail})`)
+      } finally {
+        heartbeatBusy = false
+      }
+    }, heartbeatSeconds * 1000)
+
+    if (typeof heartbeatTimer.unref === 'function') {
+      heartbeatTimer.unref()
+    }
+  }
+
+  try {
+    startHeartbeat()
+
+    const childCommand = runtime === 'codex' ? 'codex' : 'claude'
+    child = spawn(childCommand, passthrough, {
+      cwd: context.repoRoot,
+      env: childEnv,
+      stdio: 'inherit',
+    })
+
+    const handleSignal = (signal) => {
+      if (signalTriggered) return
+      signalTriggered = true
+      if (child && !child.killed) {
+        child.kill(signal)
+      }
+    }
+
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP']
+    for (const signal of signals) {
+      process.on(signal, handleSignal)
+    }
+
+    let exitResult
+    try {
+      exitResult = await new Promise((resolve, reject) => {
+        child.on('error', reject)
+        child.on('exit', (code, signal) => resolve({ code, signal }))
+      })
+    } finally {
+      for (const signal of signals) {
+        process.removeListener(signal, handleSignal)
+      }
+    }
+
+    if (exitResult.signal) {
+      process.exitCode = 1
+    } else if (typeof exitResult.code === 'number' && exitResult.code !== 0) {
+      process.exitCode = exitResult.code
+    }
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    try {
+      const latestConfig = await loadConfig()
+      await disconnectRepoSession({
+        config: latestConfig,
+        apiUrl,
+        token,
+        sessionId,
+        repoRoot: context.repoRoot,
+      })
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.error(`Warning: failed to disconnect session ${sessionId} (${detail})`)
+    }
+  }
+}
+
 async function resolveSessionId(config, args) {
-  const positional = args.find(arg => !arg.startsWith('-'))
+  const positional = firstPositional(args)
   if (positional) return positional
 
   const context = await detectRepoContext()
@@ -321,33 +832,184 @@ async function commandDisconnect(args) {
   const config = await loadConfig()
   const apiUrl = resolveApiUrl(args, config)
   const token = resolveToken(config)
-  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+  await assertLoggedIn(apiUrl, token)
 
   const sessionId = await resolveSessionId(config, args)
   if (!sessionId) throw new Error('No session_id found. Pass one explicitly or run connect in this repo.')
 
-  const disconnect = await requestJson(apiUrl, '/api/cli/disconnect', {
+  const context = await detectRepoContext()
+  const disconnected = await disconnectRepoSession({
+    config,
+    apiUrl,
+    token,
+    sessionId,
+    repoRoot: context.repoRoot,
+  })
+
+  console.log(JSON.stringify(disconnected, null, 2))
+}
+
+async function commandSessions(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  const sessions = await requestJson(apiUrl, '/api/cli/sessions', {
+    method: 'GET',
+    token,
+  })
+
+  if (!sessions.response.ok) {
+    throw new Error(sessions.data.error ?? `List sessions failed (${sessions.response.status})`)
+  }
+
+  console.log(JSON.stringify(sessions.data, null, 2))
+}
+
+async function resolveTargetSessionId(apiUrl, token, targetRaw) {
+  if (!targetRaw) throw new Error('Missing target. Use `--to <session_id|name|hex_id>`.')
+  if (isUuidLike(targetRaw)) return targetRaw
+
+  const list = await requestJson(apiUrl, '/api/cli/sessions', {
+    method: 'GET',
+    token,
+  })
+  if (!list.response.ok) {
+    throw new Error(list.data.error ?? `List sessions failed (${list.response.status})`)
+  }
+
+  const target = targetRaw.trim().toLowerCase()
+  const sessions = Array.isArray(list.data.sessions) ? list.data.sessions : []
+
+  const exact = sessions.find(session =>
+    String(session.hex_id ?? '').toLowerCase() === target
+    || String(session.name ?? '').toLowerCase() === target
+    || String(session.session_id ?? '').toLowerCase() === target,
+  )
+  if (exact?.session_id) return exact.session_id
+
+  const prefixed = sessions.filter(session => String(session.hex_id ?? '').toLowerCase().startsWith(target))
+  if (prefixed.length === 1 && prefixed[0]?.session_id) return prefixed[0].session_id
+  if (prefixed.length > 1) {
+    throw new Error(`Target "${targetRaw}" is ambiguous. Use full session_id.`)
+  }
+
+  throw new Error(`Target "${targetRaw}" not found. Run \`hexgrid sessions\` to inspect active sessions.`)
+}
+
+async function resolveSourceSessionId(config, args) {
+  const fromFlag = parseFlag(args, '--session', null) ?? parseFlag(args, '--from', null)
+  if (fromFlag) return fromFlag
+  return resolveSessionId(config, [])
+}
+
+async function commandAsk(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  const question = parseFlag(args, '--question', null)
+  const targetRaw = parseFlag(args, '--to', null)
+  if (!question) throw new Error('Missing question. Use `--question "..."`.')
+
+  const sessionId = await resolveSourceSessionId(config, args)
+  if (!sessionId) throw new Error('No source session_id found. Pass `--session` or run connect in this repo.')
+
+  const toSessionId = await resolveTargetSessionId(apiUrl, token, targetRaw)
+
+  const ask = await requestJson(apiUrl, '/api/cli/ask', {
+    method: 'POST',
+    token,
+    body: {
+      session_id: sessionId,
+      to_session_id: toSessionId,
+      question,
+    },
+  })
+
+  if (!ask.response.ok) {
+    throw new Error(ask.data.error ?? `Ask failed (${ask.response.status})`)
+  }
+
+  console.log(JSON.stringify(ask.data, null, 2))
+}
+
+async function commandInbox(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  const sessionArg = parseFlag(args, '--session', null) ?? parseFlag(args, '--for', null)
+  const sessionId = sessionArg ?? await resolveSessionId(config, args)
+  if (!sessionId) throw new Error('No session_id found. Pass one explicitly or run connect in this repo.')
+
+  const inbox = await requestJson(apiUrl, '/api/cli/inbox', {
     method: 'POST',
     token,
     body: { session_id: sessionId },
   })
 
-  if (!disconnect.response.ok) {
-    throw new Error(disconnect.data.error ?? `Disconnect failed (${disconnect.response.status})`)
+  if (!inbox.response.ok) {
+    throw new Error(inbox.data.error ?? `Inbox failed (${inbox.response.status})`)
   }
 
-  const context = await detectRepoContext()
-  const sessions = { ...(config.sessions ?? {}) }
-  const key = sessionKey(context.repoRoot)
-  if (sessions[key]?.session_id === sessionId) delete sessions[key]
+  console.log(JSON.stringify(inbox.data, null, 2))
+}
 
-  await saveConfig({
-    ...config,
-    sessions,
-    last_session_id: config.last_session_id === sessionId ? null : config.last_session_id,
+async function commandReply(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  const messageId = parseFlag(args, '--message', null) ?? firstPositional(args)
+  const answer = parseFlag(args, '--answer', null)
+  if (!messageId) throw new Error('Missing message ID. Use `--message <id>` or pass it as first positional argument.')
+  if (!answer) throw new Error('Missing answer. Use `--answer "..."`.')
+
+  const sessionId = await resolveSourceSessionId(config, args)
+  if (!sessionId) throw new Error('No session_id found. Pass `--session` or run connect in this repo.')
+
+  const reply = await requestJson(apiUrl, '/api/cli/reply', {
+    method: 'POST',
+    token,
+    body: {
+      session_id: sessionId,
+      message_id: messageId,
+      answer,
+    },
   })
 
-  console.log(JSON.stringify(disconnect.data, null, 2))
+  if (!reply.response.ok) {
+    throw new Error(reply.data.error ?? `Reply failed (${reply.response.status})`)
+  }
+
+  console.log(JSON.stringify(reply.data, null, 2))
+}
+
+async function commandResponse(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  const messageId = parseFlag(args, '--message', null) ?? firstPositional(args)
+  if (!messageId) throw new Error('Missing message ID. Use `hexgrid response <message_id>`.')
+
+  const response = await requestJson(apiUrl, '/api/cli/response', {
+    method: 'POST',
+    token,
+    body: { message_id: messageId },
+  })
+
+  if (!response.response.ok) {
+    throw new Error(response.data.error ?? `Get response failed (${response.response.status})`)
+  }
+
+  console.log(JSON.stringify(response.data, null, 2))
 }
 
 async function commandMe(args) {
@@ -391,6 +1053,26 @@ async function commandLogout(args) {
   console.log('Logged out.')
 }
 
+async function commandUpdate() {
+  if (!commandExists('npm')) {
+    throw new Error('npm is required for `hexgrid update` but was not found in PATH.')
+  }
+
+  const target = `${CLI_PACKAGE_NAME}@latest`
+  console.log(`Updating ${target}...`)
+
+  const result = spawnSync('npm', ['install', '-g', target], {
+    stdio: 'inherit',
+    env: process.env,
+  })
+
+  if (result.status !== 0) {
+    throw new Error(`npm install failed with exit code ${result.status ?? 1}`)
+  }
+
+  console.log(`Updated ${CLI_PACKAGE_NAME} to latest.`)
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2)
 
@@ -403,8 +1085,20 @@ async function main() {
     await commandLogin(args)
     return
   }
+  if (command === 'setup') {
+    await commandSetup(args)
+    return
+  }
+  if (command === 'doctor') {
+    await commandDoctor(args)
+    return
+  }
   if (command === 'connect') {
     await commandConnect(args)
+    return
+  }
+  if (command === 'run') {
+    await commandRun(args)
     return
   }
   if (command === 'heartbeat') {
@@ -415,12 +1109,36 @@ async function main() {
     await commandDisconnect(args)
     return
   }
+  if (command === 'sessions') {
+    await commandSessions(args)
+    return
+  }
+  if (command === 'ask') {
+    await commandAsk(args)
+    return
+  }
+  if (command === 'inbox') {
+    await commandInbox(args)
+    return
+  }
+  if (command === 'reply') {
+    await commandReply(args)
+    return
+  }
+  if (command === 'response') {
+    await commandResponse(args)
+    return
+  }
   if (command === 'me') {
     await commandMe(args)
     return
   }
   if (command === 'logout') {
     await commandLogout(args)
+    return
+  }
+  if (command === 'update') {
+    await commandUpdate()
     return
   }
 

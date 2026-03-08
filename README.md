@@ -172,6 +172,8 @@ Install (normal users, after publish):
 
 ```bash
 npm install -g @jackpickard/hexgrid-cli
+# later, update in place:
+hexgrid update
 ```
 
 Local dev install from repo:
@@ -187,10 +189,21 @@ Then in any repo:
 # one-time per machine (opens browser to approve on /device)
 hexgrid login
 
-# connect this repo session (metadata auto-detected)
-hexgrid connect --runtime claude
+# one-time per repo (auto MCP setup + validation)
+hexgrid setup
+hexgrid doctor --fix
+
+# start the agent with supervised session lifecycle
+hexgrid run codex
 # or
-hexgrid connect --runtime codex
+hexgrid run claude
+
+# list sessions and talk to another hex (CLI wrappers)
+hexgrid sessions
+hexgrid ask --to "<session_id|name|hex_id>" --question "Need eyes on auth flow"
+hexgrid inbox
+hexgrid reply --message "<message_id>" --answer "Done, shipped migration"
+hexgrid response "<message_id>"
 
 # keep alive / stop
 hexgrid heartbeat
@@ -209,6 +222,21 @@ CLI session endpoints:
 - `POST /api/cli/heartbeat`
 - `POST /api/cli/disconnect`
 - `POST /api/cli/logout`
+- `GET /api/cli/sessions`
+- `POST /api/cli/ask`
+- `POST /api/cli/inbox`
+- `POST /api/cli/reply`
+- `POST /api/cli/response`
+
+MCP remains supported and is the preferred extensibility path for autonomous agents:
+
+- `list_sessions`
+- `ask_agent`
+- `check_messages`
+- `respond`
+- `get_response`
+
+`hexgrid run` uses MCP under the hood, but hides setup/doctoring so users do not need to hand-edit config files.
 
 CLI publish (maintainers):
 

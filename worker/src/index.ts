@@ -52,7 +52,18 @@ import {
   disconnectSchema,
   heartbeat,
   heartbeatSchema,
+  listSessions,
 } from './tools/session'
+import {
+  askAgent,
+  askAgentSchema,
+  checkMessages,
+  checkMessagesSchema,
+  getResponse,
+  getResponseSchema,
+  respond,
+  respondSchema,
+} from './tools/messaging'
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -537,6 +548,65 @@ export default {
       }
     }
 
+    if (url.pathname === '/api/cli/sessions' && request.method === 'GET') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const result = await listSessions(env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/ask' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = askAgentSchema.parse(await request.json())
+        const result = await askAgent(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/inbox' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = checkMessagesSchema.parse(await request.json())
+        const result = await checkMessages(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/reply' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = respondSchema.parse(await request.json())
+        const result = await respond(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/response' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = getResponseSchema.parse(await request.json())
+        const result = await getResponse(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
     if (url.pathname === '/api/cli/heartbeat' && request.method === 'POST') {
       try {
         const { user } = await requireCliUser(request, env)
@@ -579,16 +649,29 @@ export default {
         return jsonResponse({ error: 'Missing bearer token' }, 401)
       }
       const tokenHash = await sha256(token)
-      const user = await getUserByAccountApiKeyHash(env.DB, tokenHash)
-      if (!user) {
-        return jsonResponse({ error: 'Invalid API key' }, 401)
+      const now = nowUnix()
+
+      let accountId: string | null = null
+
+      // Primary mode: long-lived account API key.
+      const apiKeyUser = await getUserByAccountApiKeyHash(env.DB, tokenHash)
+      if (apiKeyUser) {
+        accountId = apiKeyUser.user_id
+      } else {
+        // Fallback mode: CLI device-flow token (used by `hexgrid run` setup path).
+        const cliUser = await getSessionUserByCliTokenHash(env.DB, tokenHash, now)
+        if (!cliUser) {
+          return jsonResponse({ error: 'Invalid API key or CLI token' }, 401)
+        }
+        accountId = cliUser.user_id
+        await touchCliToken(env.DB, tokenHash, now)
       }
 
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
         sessionIdGenerator: undefined,
       })
-      const server = createMcpServer(env, { account_id: user.user_id })
+      const server = createMcpServer(env, { account_id: accountId })
       await server.connect(transport)
       return transport.handleRequest(request)
     }
