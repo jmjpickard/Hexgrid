@@ -39,7 +39,7 @@ function usage() {
 
 Usage:
   hexgrid login [--api-url URL] [--no-open] [--client-name NAME]
-  hexgrid setup [all|codex|claude]
+  hexgrid setup [all|codex|claude] [--mcp]
   hexgrid doctor [all|codex|claude] [--fix]
   hexgrid connect [--runtime RUNTIME] [--name NAME] [--description TEXT]
   hexgrid run <codex|claude> [--name NAME] [--description TEXT] [--heartbeat-seconds N] [-- ...agent args]
@@ -263,7 +263,46 @@ async function ensureCodexSetup(repoRoot, mcpUrl) {
   return codexConfigPath
 }
 
-async function ensureClaudeSetup(repoRoot, mcpUrl, token) {
+const HEXGRID_CLAUDE_BLOCK_START = '<!-- BEGIN HEXGRID (managed by hexgrid setup) -->'
+const HEXGRID_CLAUDE_BLOCK_END = '<!-- END HEXGRID -->'
+
+function renderClaudeHexgridBlock() {
+  return [
+    HEXGRID_CLAUDE_BLOCK_START,
+    '',
+    '## HexGrid — Cross-Repo Collaboration',
+    '',
+    'This repo is connected to HexGrid. When you need information about code in',
+    'another repository (API contracts, schemas, config, architecture), use the',
+    '`hexgrid` CLI rather than guessing.',
+    '',
+    '### Ask another repo',
+    '```bash',
+    'hexgrid ask --capability repo:<name> --question "..." --context "why you need this"',
+    '```',
+    '',
+    '- `--capability`: which repo/service to ask (e.g. `repo:api-service`)',
+    '- `--question`: what you need to know',
+    '- `--context`: why you\'re asking — improves answer quality',
+    '- Blocks until answered or cached knowledge is returned',
+    '',
+    '### See active sessions',
+    '```bash',
+    'hexgrid sessions',
+    '```',
+    '',
+    'Use this to discover available capabilities before asking.',
+    '',
+    '### Guidelines',
+    '- Do not guess cross-repo details — ask. Answers are cached, so repeated questions are free.',
+    '- Treat responses as authoritative context from the target codebase.',
+    '- Always include `--context` so the answering agent understands why you need the information.',
+    '',
+    HEXGRID_CLAUDE_BLOCK_END,
+  ].join('\n')
+}
+
+async function ensureClaudeMcpSetup(repoRoot, mcpUrl, token) {
   const mcpPath = path.join(repoRoot, '.mcp.json')
   const claudeDir = path.join(repoRoot, '.claude')
   const claudeSettingsPath = path.join(claudeDir, 'settings.local.json')
@@ -299,7 +338,35 @@ async function ensureClaudeSetup(repoRoot, mcpUrl, token) {
   return { mcpPath, claudeSettingsPath }
 }
 
-async function setupRuntimes({ runtimes, repoRoot, apiUrl, token }) {
+async function ensureClaudeSetup(repoRoot) {
+  const claudeDir = path.join(repoRoot, '.claude')
+  const claudeMdPath = path.join(repoRoot, 'CLAUDE.md')
+
+  await mkdir(claudeDir, { recursive: true })
+
+  const block = renderClaudeHexgridBlock()
+  let nextContent = block
+
+  if (await fileExists(claudeMdPath)) {
+    const current = await readFile(claudeMdPath, 'utf8')
+    const escapedStart = HEXGRID_CLAUDE_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const escapedEnd = HEXGRID_CLAUDE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const managedRegex = new RegExp(`${escapedStart}[\\s\\S]*?${escapedEnd}`, 'm')
+
+    if (managedRegex.test(current)) {
+      nextContent = current.replace(managedRegex, block)
+    } else {
+      nextContent = `${current.trimEnd()}\n\n${block}\n`
+    }
+  } else {
+    nextContent = `${block}\n`
+  }
+
+  await writeFile(claudeMdPath, nextContent)
+  return { claude_md_path: claudeMdPath }
+}
+
+async function setupRuntimes({ runtimes, repoRoot, apiUrl, token, mcp = false }) {
   const mcpUrl = mcpUrlFromApiUrl(apiUrl)
   const result = {}
 
@@ -311,8 +378,13 @@ async function setupRuntimes({ runtimes, repoRoot, apiUrl, token }) {
     }
 
     if (runtime === 'claude') {
-      const claudeFiles = await ensureClaudeSetup(repoRoot, mcpUrl, token)
+      const claudeFiles = await ensureClaudeSetup(repoRoot)
       result.claude = { ok: true, ...claudeFiles }
+
+      if (mcp) {
+        const mcpFiles = await ensureClaudeMcpSetup(repoRoot, mcpUrl, token)
+        result.claude = { ...result.claude, ...mcpFiles }
+      }
     }
   }
 
@@ -337,29 +409,16 @@ async function inspectRuntimeSetup(runtime, repoRoot, apiUrl) {
   }
 
   if (runtime === 'claude') {
-    const mcpPath = path.join(repoRoot, '.mcp.json')
-    const claudeSettingsPath = path.join(repoRoot, '.claude', 'settings.local.json')
-    const mcp = await readJsonMaybe(mcpPath)
-    const settings = await readJsonMaybe(claudeSettingsPath)
-
-    const mcpOk = Boolean(
-      mcp?.mcpServers?.hexgrid
-      && mcp.mcpServers.hexgrid.url === mcpUrl
-      && typeof mcp.mcpServers.hexgrid.headers?.Authorization === 'string'
-      && mcp.mcpServers.hexgrid.headers.Authorization.startsWith('Bearer '),
-    )
-    const settingsOk = Boolean(
-      settings
-      && Array.isArray(settings.enabledMcpjsonServers)
-      && settings.enabledMcpjsonServers.includes('hexgrid')
-      && settings.enableAllProjectMcpServers === true,
-    )
-
-    if (mcpOk && settingsOk) {
-      return { ok: true, mcp_path: mcpPath, claude_settings_path: claudeSettingsPath }
+    const claudeMdPath = path.join(repoRoot, 'CLAUDE.md')
+    if (!(await fileExists(claudeMdPath))) {
+      return { ok: false, reason: 'missing CLAUDE.md — run `hexgrid setup claude`' }
     }
-
-    return { ok: false, reason: 'missing or stale .mcp.json / .claude/settings.local.json HexGrid config' }
+    const content = await readFile(claudeMdPath, 'utf8')
+    const hasBlock = content.includes(HEXGRID_CLAUDE_BLOCK_START) && content.includes(HEXGRID_CLAUDE_BLOCK_END)
+    if (hasBlock) {
+      return { ok: true, claude_md_path: claudeMdPath }
+    }
+    return { ok: false, reason: 'CLAUDE.md is missing HexGrid block — run `hexgrid setup claude`' }
   }
 
   return { ok: false, reason: `unsupported runtime ${runtime}` }
@@ -523,12 +582,14 @@ async function commandSetup(args) {
   await assertLoggedIn(apiUrl, token)
 
   const runtimes = parseRuntimes(primary, 'all')
+  const useMcp = hasFlag(primary, '--mcp')
   const context = await detectRepoContext()
   const setupResult = await setupRuntimes({
     runtimes,
     repoRoot: context.repoRoot,
     apiUrl,
     token,
+    mcp: useMcp,
   })
 
   console.log(JSON.stringify({
