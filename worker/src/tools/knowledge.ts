@@ -43,6 +43,8 @@ export async function writeKnowledge(
     tags: JSON.stringify(tags),
     created_at: now,
     updated_at: now,
+    source_message_id: null,
+    capability: null,
   })
 
   return { id, topic: input.topic.trim() }

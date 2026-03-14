@@ -57,10 +57,14 @@ import {
 import {
   askAgent,
   askAgentSchema,
+  askByCapability,
+  askByCapabilitySchema,
   checkMessages,
   checkMessagesSchema,
   getResponse,
   getResponseSchema,
+  pollByCapability,
+  pollByCapabilitySchema,
   respond,
   respondSchema,
 } from './tools/messaging'
@@ -562,8 +566,39 @@ export default {
     if (url.pathname === '/api/cli/ask' && request.method === 'POST') {
       try {
         const { user } = await requireCliUser(request, env)
-        const body = askAgentSchema.parse(await request.json())
+        const raw = await request.json()
+        // Route to capability-based ask if capability field is present
+        if (raw && typeof raw === 'object' && 'capability' in raw) {
+          const body = askByCapabilitySchema.parse(raw)
+          const result = await askByCapability(body, env, { account_id: user.user_id })
+          return jsonResponse(result)
+        }
+        const body = askAgentSchema.parse(raw)
         const result = await askAgent(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/poll' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = pollByCapabilitySchema.parse(await request.json())
+        const result = await pollByCapability(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/register' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = connectSessionSchema.parse(await request.json())
+        const result = await connectSession({ ...body, is_listener: true }, env, { account_id: user.user_id })
         return jsonResponse(result)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400

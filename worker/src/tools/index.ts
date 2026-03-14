@@ -12,7 +12,9 @@ export {
 
 export {
   askAgent, askAgentSchema,
+  askByCapability, askByCapabilitySchema,
   checkMessages, checkMessagesSchema,
+  pollByCapability, pollByCapabilitySchema,
   respond, respondSchema,
   getResponse, getResponseSchema,
 } from './messaging'

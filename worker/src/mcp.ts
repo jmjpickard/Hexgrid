@@ -10,6 +10,7 @@ import {
   writeKnowledge, writeKnowledgeSchema,
   searchKnowledge, searchKnowledgeSchema,
   askAgent, askAgentSchema,
+  askByCapability, askByCapabilitySchema,
   checkMessages, checkMessagesSchema,
   respond, respondSchema,
   getResponse, getResponseSchema,
@@ -125,6 +126,19 @@ export function createMcpServer(env: Env, account: AccountAuthContext): McpServe
       try {
         const parsed = askAgentSchema.parse(input)
         return ok(await askAgent(parsed, env, account))
+      } catch (err) { return fail(err) }
+    },
+  )
+
+  // ── ask_by_capability ──────────────────────────────────────────────────────
+  server.tool(
+    'ask_by_capability',
+    'Ask a question targeting a capability (e.g. "repo:api-service"). First checks knowledge for an instant answer, then routes to live sessions with that capability. Returns either a knowledge hit or routed message IDs.',
+    askByCapabilitySchema.shape,
+    async (input) => {
+      try {
+        const parsed = askByCapabilitySchema.parse(input)
+        return ok(await askByCapability(parsed, env, account))
       } catch (err) { return fail(err) }
     },
   )

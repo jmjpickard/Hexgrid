@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   last_heartbeat  INTEGER NOT NULL,
   connected_at    INTEGER NOT NULL,
   disconnected_at INTEGER,
+  is_listener     INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (account_id) REFERENCES users(user_id)
 );
 
@@ -94,20 +95,23 @@ CREATE INDEX IF NOT EXISTS idx_agent_sessions_heartbeat ON agent_sessions(last_h
 -- Persistent shared memory. Agents write insights; all sessions on account can search.
 
 CREATE TABLE IF NOT EXISTS knowledge (
-  id              TEXT PRIMARY KEY,
-  account_id      TEXT NOT NULL,
-  session_id      TEXT NOT NULL,
-  topic           TEXT NOT NULL,
-  content         TEXT NOT NULL,
-  tags            TEXT NOT NULL DEFAULT '[]',
-  created_at      INTEGER NOT NULL,
-  updated_at      INTEGER NOT NULL,
+  id                TEXT PRIMARY KEY,
+  account_id        TEXT NOT NULL,
+  session_id        TEXT NOT NULL,
+  topic             TEXT NOT NULL,
+  content           TEXT NOT NULL,
+  tags              TEXT NOT NULL DEFAULT '[]',
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  source_message_id TEXT,
+  capability        TEXT,
   FOREIGN KEY (account_id) REFERENCES users(user_id),
   FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_account ON knowledge(account_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge(account_id, topic);
+CREATE INDEX IF NOT EXISTS idx_knowledge_capability ON knowledge(account_id, capability);
 
 -- ─── MESSAGES ────────────────────────────────────────────────────────────────
 -- Async request/response between agent sessions.
@@ -123,6 +127,8 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at      INTEGER NOT NULL,
   answered_at     INTEGER,
   expires_at      INTEGER NOT NULL,
+  capability      TEXT,
+  context         TEXT,
   FOREIGN KEY (account_id) REFERENCES users(user_id),
   FOREIGN KEY (from_session_id) REFERENCES agent_sessions(session_id),
   FOREIGN KEY (to_session_id) REFERENCES agent_sessions(session_id)
@@ -131,6 +137,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_session_id, status);
 CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_session_id, status);
 CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at);
+CREATE INDEX IF NOT EXISTS idx_messages_capability ON messages(account_id, capability, status);
 
 -- ─── CONNECTIONS ─────────────────────────────────────────────────────────────
 -- Interaction graph between sessions. Strengthens with each ask/respond.

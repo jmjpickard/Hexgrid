@@ -23,6 +23,7 @@ export const connectSessionSchema = z.object({
   repo_url: z.string().max(500).optional(),
   description: z.string().max(200).optional(),
   capabilities: z.array(z.string().max(50)).max(20).optional(),
+  is_listener: z.boolean().optional(),
 })
 
 export async function connectSession(
@@ -55,6 +56,7 @@ export async function connectSession(
     status: 'active',
     last_heartbeat: now,
     connected_at: now,
+    is_listener: input.is_listener ? 1 : 0,
   })
 
   const active = await listActiveSessions(env.DB, account.account_id)

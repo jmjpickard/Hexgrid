@@ -97,7 +97,7 @@ export function sanitiseDescription(desc: string): string {
 export function sanitiseCapabilities(caps: string[]): string[] {
   return caps
     .slice(0, MAX_CAPABILITIES)
-    .map(c => c.trim().toLowerCase().slice(0, MAX_CAPABILITY_LENGTH).replace(/[^a-z0-9_-]/g, ''))
+    .map(c => c.trim().toLowerCase().slice(0, MAX_CAPABILITY_LENGTH).replace(/[^a-z0-9_:-]/g, ''))
     .filter(c => c.length > 0)
 }
 

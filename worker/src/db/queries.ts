@@ -282,8 +282,8 @@ export async function insertAgentSession(
     .prepare(`
       INSERT INTO agent_sessions (
         session_id, account_id, name, repo_url, description,
-        capabilities, hex_id, status, last_heartbeat, connected_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        capabilities, hex_id, status, last_heartbeat, connected_at, is_listener
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .bind(
       session.session_id,
@@ -296,6 +296,7 @@ export async function insertAgentSession(
       session.status,
       session.last_heartbeat,
       session.connected_at,
+      session.is_listener,
     )
     .run()
 }
@@ -345,6 +346,23 @@ export async function expireStaleSessions(db: D1Database, staleThreshold: number
     .run()
 }
 
+export async function findActiveSessionsByCapability(
+  db: D1Database,
+  accountId: string,
+  capability: string,
+): Promise<AgentSessionRow[]> {
+  const like = `%"${capability}"%`
+  const result = await db
+    .prepare(`
+      SELECT * FROM agent_sessions
+      WHERE account_id = ? AND capabilities LIKE ? AND status = 'active'
+      ORDER BY is_listener DESC, last_heartbeat DESC
+    `)
+    .bind(accountId, like)
+    .all<AgentSessionRow>()
+  return result.results
+}
+
 export async function getAllOccupiedHexIds(db: D1Database): Promise<Set<string>> {
   const result = await db
     .prepare("SELECT hex_id FROM agent_sessions WHERE status = 'active'")
@@ -357,8 +375,8 @@ export async function getAllOccupiedHexIds(db: D1Database): Promise<Set<string>>
 export async function insertKnowledge(db: D1Database, entry: KnowledgeRow): Promise<void> {
   await db
     .prepare(`
-      INSERT INTO knowledge (id, account_id, session_id, topic, content, tags, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO knowledge (id, account_id, session_id, topic, content, tags, created_at, updated_at, source_message_id, capability)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .bind(
       entry.id,
@@ -369,6 +387,8 @@ export async function insertKnowledge(db: D1Database, entry: KnowledgeRow): Prom
       entry.tags,
       entry.created_at,
       entry.updated_at,
+      entry.source_message_id,
+      entry.capability,
     )
     .run()
 }
@@ -437,13 +457,33 @@ export async function deleteKnowledge(db: D1Database, id: string, accountId: str
   return (result.meta?.changes ?? 0) > 0
 }
 
+export async function searchKnowledgeByCapability(
+  db: D1Database,
+  accountId: string,
+  capability: string,
+  question: string,
+  limit = 3,
+): Promise<KnowledgeRow[]> {
+  const like = `%${question}%`
+  const result = await db
+    .prepare(`
+      SELECT * FROM knowledge
+      WHERE account_id = ? AND capability = ? AND (topic LIKE ? OR content LIKE ?)
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `)
+    .bind(accountId, capability, like, like, limit)
+    .all<KnowledgeRow>()
+  return result.results
+}
+
 // ─── MESSAGES ─────────────────────────────────────────────────────────────────
 
 export async function insertMessage(db: D1Database, msg: MessageRow): Promise<void> {
   await db
     .prepare(`
-      INSERT INTO messages (id, account_id, from_session_id, to_session_id, question, answer, status, created_at, answered_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, account_id, from_session_id, to_session_id, question, answer, status, created_at, answered_at, expires_at, capability, context)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .bind(
       msg.id,
@@ -456,6 +496,8 @@ export async function insertMessage(db: D1Database, msg: MessageRow): Promise<vo
       msg.created_at,
       msg.answered_at,
       msg.expires_at,
+      msg.capability,
+      msg.context,
     )
     .run()
 }
@@ -510,6 +552,48 @@ export async function deleteOldAnsweredMessages(db: D1Database, olderThan: numbe
   await db
     .prepare("DELETE FROM messages WHERE status = 'answered' AND answered_at < ?")
     .bind(olderThan)
+    .run()
+}
+
+export async function getPendingMessagesByCapability(
+  db: D1Database,
+  accountId: string,
+  sessionId: string,
+  capability?: string,
+): Promise<Array<MessageRow & { from_session_name: string }>> {
+  let sql = `
+    SELECT m.*, s.name AS from_session_name
+    FROM messages m
+    LEFT JOIN agent_sessions s ON s.session_id = m.from_session_id
+    WHERE m.to_session_id = ? AND m.account_id = ? AND m.status = 'pending'
+  `
+  const params: (string | number)[] = [sessionId, accountId]
+
+  if (capability) {
+    sql += ' AND m.capability = ?'
+    params.push(capability)
+  }
+
+  sql += ' ORDER BY m.created_at ASC'
+
+  const stmt = db.prepare(sql)
+  const bound = stmt.bind(...params)
+  const result = await bound.all<MessageRow & { from_session_name: string }>()
+  return result.results
+}
+
+export async function expireSiblingCapabilityMessages(
+  db: D1Database,
+  answeredMessageId: string,
+  fromSessionId: string,
+  capability: string,
+): Promise<void> {
+  await db
+    .prepare(`
+      UPDATE messages SET status = 'expired'
+      WHERE from_session_id = ? AND capability = ? AND status = 'pending' AND id != ?
+    `)
+    .bind(fromSessionId, capability, answeredMessageId)
     .run()
 }
 

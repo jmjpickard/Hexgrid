@@ -78,6 +78,24 @@ jobs:
             exit 1
           fi
 
+      - name: Run D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          WRANGLER="bunx wrangler d1 execute hexgrid-db --config wrangler.toml --env production --remote"
+          for f in worker/src/db/migration-*.sql; do
+            [ -f "$f" ] || continue
+            echo "Running migration: $f"
+            while IFS= read -r stmt; do
+              stmt="$(echo "$stmt" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
+              [ -z "$stmt" ] && continue
+              echo "$stmt" | grep -qi '^--' && continue
+              echo "  → $stmt"
+              $WRANGLER --command "$stmt" || echo "  ⚠ statement failed (may already be applied)"
+            done < <(sed 's/;/;\n/g' "$f")
+          done
+
       - name: Apply production D1 schema
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

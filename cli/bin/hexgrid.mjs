@@ -46,7 +46,9 @@ Usage:
   hexgrid heartbeat [SESSION_ID]
   hexgrid disconnect [SESSION_ID]
   hexgrid sessions
-  hexgrid ask --to TARGET [--question TEXT] [--session SESSION_ID]
+  hexgrid ask --capability CAP --question TEXT [--context TEXT] [--session SESSION_ID]
+  hexgrid ask --to TARGET --question TEXT [--session SESSION_ID]
+  hexgrid listen [--capability CAP] [--name NAME] [--poll-seconds N]
   hexgrid inbox [SESSION_ID]
   hexgrid reply --message MESSAGE_ID --answer TEXT [--session SESSION_ID]
   hexgrid response MESSAGE_ID
@@ -911,12 +913,72 @@ async function commandAsk(args) {
   if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
 
   const question = parseFlag(args, '--question', null)
+  const capability = parseFlag(args, '--capability', null)
   const targetRaw = parseFlag(args, '--to', null)
+  const context = parseFlag(args, '--context', null)
   if (!question) throw new Error('Missing question. Use `--question "..."`.')
 
   const sessionId = await resolveSourceSessionId(config, args)
   if (!sessionId) throw new Error('No source session_id found. Pass `--session` or run connect in this repo.')
 
+  // Capability-based ask
+  if (capability) {
+    const askBody = { session_id: sessionId, capability, question }
+    if (context) askBody.context = context
+
+    const ask = await requestJson(apiUrl, '/api/cli/ask', {
+      method: 'POST',
+      token,
+      body: askBody,
+    })
+
+    if (!ask.response.ok) {
+      throw new Error(ask.data.error ?? `Ask failed (${ask.response.status})`)
+    }
+
+    // Knowledge hit — instant answer
+    if (ask.data.source === 'knowledge') {
+      console.log(`[knowledge] Answer from knowledge graph (id: ${ask.data.knowledge_id}):\n`)
+      console.log(ask.data.answer)
+      return
+    }
+
+    // Routed — poll for response
+    const messageIds = ask.data.message_ids ?? []
+    if (messageIds.length === 0) {
+      throw new Error('No messages were routed.')
+    }
+
+    console.log(`Routed to ${ask.data.routed_to?.length ?? 0} session(s). Waiting for answer...`)
+    const startedAt = Date.now()
+    const deadline = startedAt + 5 * 60 * 1000 // 5 min timeout
+
+    while (Date.now() < deadline) {
+      await sleep(3000)
+      for (const msgId of messageIds) {
+        const resp = await requestJson(apiUrl, '/api/cli/response', {
+          method: 'POST',
+          token,
+          body: { message_id: msgId },
+        })
+
+        if (resp.response.ok && resp.data.status === 'answered' && resp.data.answer) {
+          console.log(`\n[answered] Response received:\n`)
+          console.log(resp.data.answer)
+          return
+        }
+
+        if (resp.response.ok && resp.data.status === 'expired') {
+          throw new Error('Message expired without an answer.')
+        }
+      }
+      process.stdout.write('.')
+    }
+
+    throw new Error('Timed out waiting for answer (5 min).')
+  }
+
+  // Direct session-id ask (existing behavior)
   const toSessionId = await resolveTargetSessionId(apiUrl, token, targetRaw)
 
   const ask = await requestJson(apiUrl, '/api/cli/ask', {
@@ -934,6 +996,175 @@ async function commandAsk(args) {
   }
 
   console.log(JSON.stringify(ask.data, null, 2))
+}
+
+function invokeClaudeHeadless(question, repoRoot) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', ['-p', question], {
+      cwd: repoRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 5 * 60 * 1000, // 5 minute timeout
+    })
+
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+
+    child.on('error', (err) => reject(new Error(`Failed to invoke claude: ${err.message}`)))
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(`claude exited with code ${code}: ${stderr.trim()}`))
+      } else {
+        resolve(stdout.trim())
+      }
+    })
+  })
+}
+
+const DEFAULT_POLL_SECONDS = 10
+
+async function commandListen(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
+
+  await assertApiHealthy(apiUrl)
+  await assertLoggedIn(apiUrl, token)
+
+  const context = await detectRepoContext()
+  const capability = parseFlag(args, '--capability', `repo:${context.repoName}`)
+  const name = parseFlag(args, '--name', `${context.repoName}-listener`)
+  const pollSeconds = parsePositiveInt(parseFlag(args, '--poll-seconds', null), DEFAULT_POLL_SECONDS)
+
+  // Register as listener
+  const register = await requestJson(apiUrl, '/api/cli/register', {
+    method: 'POST',
+    token,
+    body: {
+      name,
+      repo_url: context.repoUrl,
+      description: `Listener for ${capability}`,
+      capabilities: [capability],
+    },
+  })
+
+  if (!register.response.ok) {
+    throw new Error(register.data.error ?? `Register failed (${register.response.status})`)
+  }
+
+  const sessionId = register.data.session_id
+  console.log(JSON.stringify({
+    ok: true,
+    mode: 'listen',
+    session_id: sessionId,
+    capability,
+    poll_seconds: pollSeconds,
+    repo: context.repoName,
+  }, null, 2))
+
+  let heartbeatTimer = null
+  let heartbeatBusy = false
+  let running = true
+
+  const startHeartbeat = () => {
+    heartbeatTimer = setInterval(async () => {
+      if (heartbeatBusy) return
+      heartbeatBusy = true
+      try {
+        await requestJson(apiUrl, '/api/cli/heartbeat', {
+          method: 'POST',
+          token,
+          body: { session_id: sessionId },
+        })
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err)
+        console.error(`Warning: heartbeat error (${detail})`)
+      } finally {
+        heartbeatBusy = false
+      }
+    }, DEFAULT_HEARTBEAT_SECONDS * 1000)
+
+    if (typeof heartbeatTimer.unref === 'function') {
+      heartbeatTimer.unref()
+    }
+  }
+
+  const shutdown = async () => {
+    if (!running) return
+    running = false
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    try {
+      await requestJson(apiUrl, '/api/cli/disconnect', {
+        method: 'POST',
+        token,
+        body: { session_id: sessionId },
+      })
+      console.log('\nDisconnected.')
+    } catch {
+      // best-effort
+    }
+    process.exit(0)
+  }
+
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+
+  startHeartbeat()
+  console.log(`Listening for questions on capability "${capability}"... (Ctrl+C to stop)`)
+
+  while (running) {
+    await sleep(pollSeconds * 1000)
+    if (!running) break
+
+    try {
+      const poll = await requestJson(apiUrl, '/api/cli/poll', {
+        method: 'POST',
+        token,
+        body: { session_id: sessionId, capability },
+      })
+
+      if (!poll.response.ok) continue
+
+      const messages = poll.data.messages ?? []
+      for (const msg of messages) {
+        if (!running) break
+        console.log(`\n[question] From ${msg.from_session_name}: ${msg.question}`)
+        if (msg.context) console.log(`[context] ${msg.context}`)
+
+        try {
+          const prompt = msg.context
+            ? `Question: ${msg.question}\nContext: ${msg.context}`
+            : msg.question
+          console.log('[answering] Invoking claude...')
+          const answer = await invokeClaudeHeadless(prompt, context.repoRoot)
+
+          const reply = await requestJson(apiUrl, '/api/cli/reply', {
+            method: 'POST',
+            token,
+            body: {
+              session_id: sessionId,
+              message_id: msg.message_id,
+              answer,
+            },
+          })
+
+          if (reply.response.ok) {
+            console.log(`[answered] Reply sent for message ${msg.message_id}`)
+          } else {
+            console.error(`[error] Reply failed: ${reply.data.error ?? reply.response.status}`)
+          }
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err)
+          console.error(`[error] Failed to answer message ${msg.message_id}: ${detail}`)
+        }
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.error(`Warning: poll error (${detail})`)
+    }
+  }
 }
 
 async function commandInbox(args) {
@@ -1115,6 +1346,10 @@ async function main() {
   }
   if (command === 'ask') {
     await commandAsk(args)
+    return
+  }
+  if (command === 'listen') {
+    await commandListen(args)
     return
   }
   if (command === 'inbox') {

@@ -67,6 +67,7 @@ export interface AgentSessionRow {
   last_heartbeat: number
   connected_at: number
   disconnected_at: number | null
+  is_listener: number
 }
 
 export interface KnowledgeRow {
@@ -78,6 +79,8 @@ export interface KnowledgeRow {
   tags: string // JSON array
   created_at: number
   updated_at: number
+  source_message_id: string | null
+  capability: string | null
 }
 
 export interface MessageRow {
@@ -91,6 +94,8 @@ export interface MessageRow {
   created_at: number
   answered_at: number | null
   expires_at: number
+  capability: string | null
+  context: string | null
 }
 
 export interface ConnectionRow {
@@ -117,11 +122,45 @@ export interface AccountAuthContext {
 
 // ─── MCP TOOL I/O ─────────────────────────────────────────────────────────────
 
+export interface AskByCapabilityInput {
+  session_id: string
+  capability: string
+  question: string
+  context?: string
+}
+
+export interface AskByCapabilityOutput {
+  source: 'knowledge' | 'routed'
+  answer?: string
+  knowledge_id?: string
+  message_ids?: string[]
+  routed_to?: string[]
+}
+
+export interface PollByCapabilityInput {
+  session_id: string
+  capability?: string
+}
+
+export interface PollByCapabilityOutput {
+  messages: Array<{
+    message_id: string
+    from_session_id: string
+    from_session_name: string
+    question: string
+    context: string | null
+    capability: string | null
+    created_at: number
+  }>
+  total: number
+}
+
 export interface ConnectSessionInput {
   name: string
   repo_url?: string
   description?: string
   capabilities?: string[]
+  is_listener?: boolean
 }
 
 export interface ConnectSessionOutput {
