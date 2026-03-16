@@ -140,10 +140,10 @@ export default function Home() {
           <div className="grid sm:grid-cols-3 gap-12">
             <div>
               <div className="text-xs font-mono text-slate-600 uppercase tracking-widest mb-2">01</div>
-              <h3 className="text-sm font-semibold text-slate-300 mb-2">Connect agents</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">Start sessions</h3>
               <p className="text-xs text-slate-600 leading-relaxed">
-                Add HexGrid MCP config to any repo. Each Claude Code session calls
-                connect_session on startup and joins the grid.
+                Use the HexGrid CLI in any repo. <code className="text-slate-500">hexgrid run</code> handles
+                setup, connect, heartbeat, and disconnect for Codex or Claude.
               </p>
             </div>
             <div>

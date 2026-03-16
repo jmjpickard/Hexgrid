@@ -28,54 +28,24 @@ export default function ApiKeySetup({ existingPrefix }: ApiKeySetupProps) {
     },
   }, null, 2)
 
-  const claudeCommand = `claude mcp add --scope project --transport http hexgrid ${mcpUrl} --header "Authorization: Bearer ${token}"`
+  const cliInstall = 'npm install -g @jackpickard/hexgrid-cli'
+  const codexQuickstart = `${cliInstall}
+hexgrid login
 
-  const codexConfig = `[mcp_servers.hexgrid]
-url = "${mcpUrl}"
-bearer_token_env_var = "HEXGRID_API_KEY"`
+# inside the repo you want to connect
+hexgrid setup
+hexgrid doctor --fix
+hexgrid onboard
+hexgrid run codex`
 
-  const claudePrompt = `You are the live agent for this repository and should join HexGrid as this repo session.
+  const claudeQuickstart = `${cliInstall}
+hexgrid login
 
-Run these steps now:
-1. Ensure HexGrid MCP is configured in project scope:
-   ${claudeCommand}
-2. Detect repo metadata:
-   - repo_name: basename of git root
-   - repo_url: git remote origin URL (fallback local://<absolute-path>)
-   - repo_type: backend, frontend, or fullstack
-   - tools: available CLI tools (git, rg, npm, pnpm, bun, docker, pytest, etc.)
-3. Call connect_session once with:
-   - name: "<repo_name>-claude"
-   - repo_url
-   - description: "Claude session for <repo_name> (<repo_type>)"
-   - capabilities: include tags like "repo:<repo_name>", "surface:<repo_type>", and "tool:<tool>"
-4. Save session_id from the response and call heartbeat every 5 minutes.
-5. On shutdown, call disconnect with session_id.
-
-Return a short summary with repo_name, repo_url, repo_type, capabilities, and session_id.`
-
-  const codexPrompt = `You are the live Codex agent for this repository and should join HexGrid as this repo session.
-
-Run these steps now:
-1. Ensure project-scoped Codex MCP config exists at .codex/config.toml with:
-   ${codexConfig}
-2. Ensure bearer token is set for this shell:
-   export HEXGRID_API_KEY="${token}"
-3. If HexGrid tools are not available yet, restart Codex in this repo and continue.
-4. Detect repo metadata:
-   - repo_name: basename of git root
-   - repo_url: git remote origin URL (fallback local://<absolute-path>)
-   - repo_type: backend, frontend, or fullstack
-   - tools: available CLI tools (git, rg, npm, pnpm, bun, docker, pytest, etc.)
-5. Call connect_session once with:
-   - name: "<repo_name>-codex"
-   - repo_url
-   - description: "Codex session for <repo_name> (<repo_type>)"
-   - capabilities: include tags like "repo:<repo_name>", "surface:<repo_type>", and "tool:<tool>"
-6. Save session_id and call heartbeat every 5 minutes.
-7. On shutdown, call disconnect with session_id.
-
-Return a short summary with repo_name, repo_url, repo_type, capabilities, and session_id.`
+# inside the repo you want to connect
+hexgrid setup
+hexgrid doctor --fix
+hexgrid onboard
+hexgrid run claude`
 
   async function generate() {
     setGenerating(true)
@@ -97,6 +67,10 @@ Return a short summary with repo_name, repo_url, repo_type, capabilities, and se
     <div className="border border-white/[0.06] p-4 space-y-4">
       <div>
         <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-2">API Key</div>
+        <p className="text-xs text-slate-600 leading-relaxed mb-3">
+          Optional for manual MCP clients. The recommended Codex and Claude flow now uses the HexGrid CLI with{' '}
+          <code className="text-slate-400">hexgrid login</code>.
+        </p>
         {prefix && !apiKey && (
           <div className="text-xs font-mono text-slate-400 mb-2">
             Current key: <span className="text-slate-300">{prefix}...</span>
@@ -118,48 +92,46 @@ Return a short summary with repo_name, repo_url, repo_type, capabilities, and se
       </div>
 
       <div>
-        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-2">MCP Config</div>
+        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-2">Repo Quickstarts</div>
         <p className="text-xs text-slate-600 leading-relaxed mb-3">
-          Add this to your Claude Code MCP config (or any MCP client). Each agent session calls{' '}
-          <code className="text-slate-400">connect_session</code> on startup.
+          Install the CLI once, log in once per machine, then run one of these inside the repo you want to join.
+          HexGrid handles repo setup, onboarding, connect, heartbeat, and disconnect for you.
         </p>
+        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-2">Codex</div>
         <pre className="text-xs font-mono text-slate-400 bg-white/[0.02] p-3 overflow-auto whitespace-pre-wrap border border-white/[0.04]">
+{codexQuickstart}
+        </pre>
+        <button
+          onClick={() => copyText(codexQuickstart, 'codex')}
+          className="mt-2 w-full text-xs font-mono font-medium text-slate-900 bg-slate-300 hover:bg-white py-2 transition-colors"
+        >
+          {copied === 'codex' ? 'copied' : 'copy codex quickstart'}
+        </button>
+
+        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-4 mb-2">Claude</div>
+        <pre className="text-xs font-mono text-slate-400 bg-white/[0.02] p-3 overflow-auto whitespace-pre-wrap border border-white/[0.04] max-h-56">
+{claudeQuickstart}
+        </pre>
+        <button
+          onClick={() => copyText(claudeQuickstart, 'claude')}
+          className="mt-2 w-full text-xs font-mono font-medium text-slate-900 bg-slate-300 hover:bg-white py-2 transition-colors"
+        >
+          {copied === 'claude' ? 'copied' : 'copy claude quickstart'}
+        </button>
+
+        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-4 mb-2">Manual MCP Config</div>
+        <p className="text-xs text-slate-600 leading-relaxed mb-3">
+          Advanced fallback for custom MCP clients. Most users should use the CLI quickstart above instead of
+          hand-editing config.
+        </p>
+        <pre className="text-xs font-mono text-slate-400 bg-white/[0.02] p-3 overflow-auto whitespace-pre-wrap border border-white/[0.04] max-h-56">
 {config}
         </pre>
         <button
           onClick={() => copyText(config, 'config')}
           className="mt-2 w-full text-xs font-mono font-medium text-slate-900 bg-slate-300 hover:bg-white py-2 transition-colors"
         >
-          {copied === 'config' ? 'copied' : 'copy config'}
-        </button>
-      </div>
-
-      <div>
-        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-2">Agent Bootstrap Prompts</div>
-        <p className="text-xs text-slate-600 leading-relaxed mb-3">
-          Paste one of these into a local Claude or Codex session running inside a repo to set up MCP and join HexGrid with repo metadata.
-        </p>
-
-        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-2">Claude</div>
-        <pre className="text-xs font-mono text-slate-400 bg-white/[0.02] p-3 overflow-auto whitespace-pre-wrap border border-white/[0.04] max-h-56">
-{claudePrompt}
-        </pre>
-        <button
-          onClick={() => copyText(claudePrompt, 'claude')}
-          className="mt-2 w-full text-xs font-mono font-medium text-slate-900 bg-slate-300 hover:bg-white py-2 transition-colors"
-        >
-          {copied === 'claude' ? 'copied' : 'copy claude prompt'}
-        </button>
-
-        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-4 mb-2">Codex</div>
-        <pre className="text-xs font-mono text-slate-400 bg-white/[0.02] p-3 overflow-auto whitespace-pre-wrap border border-white/[0.04] max-h-56">
-{codexPrompt}
-        </pre>
-        <button
-          onClick={() => copyText(codexPrompt, 'codex')}
-          className="mt-2 w-full text-xs font-mono font-medium text-slate-900 bg-slate-300 hover:bg-white py-2 transition-colors"
-        >
-          {copied === 'codex' ? 'copied' : 'copy codex prompt'}
+          {copied === 'config' ? 'copied' : 'copy manual config'}
         </button>
       </div>
     </div>
