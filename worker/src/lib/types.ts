@@ -3,6 +3,8 @@
 export type SessionStatus = 'active' | 'disconnected'
 export type MessageStatus = 'pending' | 'answered' | 'expired'
 export type DeviceAuthStatus = 'pending' | 'approved' | 'consumed'
+export type KnowledgeStatus = 'candidate' | 'canonical' | 'stale' | 'archived'
+export type KnowledgeFreshness = 'stable' | 'working' | 'volatile'
 
 // ─── DATABASE ROWS ────────────────────────────────────────────────────────────
 
@@ -84,13 +86,26 @@ export interface KnowledgeRow {
   id: string
   account_id: string
   session_id: string
+  repo_key: string
+  kind: string
+  status: KnowledgeStatus
   topic: string
   content: string
   tags: string // JSON array
+  source_refs: string // JSON array
+  confidence: number
+  freshness: KnowledgeFreshness
   created_at: number
   updated_at: number
+  verified_at: number | null
+  expires_at: number | null
   source_message_id: string | null
   capability: string | null
+}
+
+export interface KnowledgeSourceRef {
+  path: string
+  note?: string
 }
 
 export interface MessageRow {
@@ -216,27 +231,51 @@ export interface WriteKnowledgeInput {
   topic: string
   content: string
   tags?: string[]
+  repo_url?: string
+  kind?: string
+  status?: KnowledgeStatus
+  confidence?: number
+  freshness?: KnowledgeFreshness
+  source_refs?: KnowledgeSourceRef[]
+  verified_at?: number
+  expires_at?: number
+  capability?: string
 }
 
 export interface WriteKnowledgeOutput {
   id: string
   topic: string
+  kind: string
+  status: KnowledgeStatus
 }
 
 export interface SearchKnowledgeInput {
   query?: string
   tags?: string[]
+  repo_key?: string
+  kind?: string
+  status?: KnowledgeStatus
   limit?: number
 }
 
 export interface SearchKnowledgeOutput {
   entries: Array<{
     id: string
+    repo_key: string
+    kind: string
+    status: KnowledgeStatus
     topic: string
     content: string
     tags: string[]
+    source_refs: KnowledgeSourceRef[]
+    confidence: number
+    freshness: KnowledgeFreshness
     session_name: string
     created_at: number
+    updated_at: number
+    verified_at: number | null
+    expires_at: number | null
+    capability: string | null
   }>
   total: number
 }

@@ -7,6 +7,7 @@ import type {
   ConnectionRow,
   DeviceAuthRequestRow,
   KnowledgeRow,
+  KnowledgeStatus,
   MessageRow,
   RepoHexClaimRow,
   SessionUser,
@@ -448,57 +449,111 @@ export async function getAllOccupiedHexIds(db: D1Database): Promise<Set<string>>
 export async function insertKnowledge(db: D1Database, entry: KnowledgeRow): Promise<void> {
   await db
     .prepare(`
-      INSERT INTO knowledge (id, account_id, session_id, topic, content, tags, created_at, updated_at, source_message_id, capability)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO knowledge (
+        id, account_id, session_id, repo_key, kind, status, topic, content, tags,
+        source_refs, confidence, freshness, created_at, updated_at, verified_at,
+        expires_at, source_message_id, capability
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .bind(
       entry.id,
       entry.account_id,
       entry.session_id,
+      entry.repo_key,
+      entry.kind,
+      entry.status,
       entry.topic,
       entry.content,
       entry.tags,
+      entry.source_refs,
+      entry.confidence,
+      entry.freshness,
       entry.created_at,
       entry.updated_at,
+      entry.verified_at,
+      entry.expires_at,
       entry.source_message_id,
       entry.capability,
     )
     .run()
 }
 
+type KnowledgeSearchParams = {
+  query?: string
+  tags?: string[]
+  repoKey?: string
+  kind?: string
+  status?: KnowledgeStatus
+  limit?: number
+}
+
+const KNOWLEDGE_ORDER_SQL = `
+  ORDER BY
+    CASE k.status
+      WHEN 'canonical' THEN 0
+      WHEN 'candidate' THEN 1
+      WHEN 'stale' THEN 2
+      ELSE 3
+    END ASC,
+    k.confidence DESC,
+    k.updated_at DESC
+`
+
 export async function searchKnowledge(
   db: D1Database,
   accountId: string,
-  query?: string,
-  tags?: string[],
-  limit = 20,
+  searchParams: KnowledgeSearchParams = {},
 ): Promise<Array<KnowledgeRow & { session_name: string }>> {
+  const {
+    query,
+    tags,
+    repoKey,
+    kind,
+    status,
+    limit = 20,
+  } = searchParams
   let sql = `
     SELECT k.*, s.name AS session_name
     FROM knowledge k
     LEFT JOIN agent_sessions s ON s.session_id = k.session_id
     WHERE k.account_id = ?
   `
-  const params: (string | number)[] = [accountId]
+  const binds: (string | number)[] = [accountId]
 
   if (query) {
     sql += ' AND (k.topic LIKE ? OR k.content LIKE ?)'
     const like = `%${query}%`
-    params.push(like, like)
+    binds.push(like, like)
   }
 
   if (tags && tags.length > 0) {
     for (const tag of tags) {
       sql += ' AND k.tags LIKE ?'
-      params.push(`%"${tag}"%`)
+      binds.push(`%"${tag}"%`)
     }
   }
 
-  sql += ' ORDER BY k.updated_at DESC LIMIT ?'
-  params.push(limit)
+  if (repoKey) {
+    sql += ' AND k.repo_key = ?'
+    binds.push(repoKey)
+  }
+
+  if (kind) {
+    sql += ' AND k.kind = ?'
+    binds.push(kind)
+  }
+
+  if (status) {
+    sql += ' AND k.status = ?'
+    binds.push(status)
+  }
+
+  sql += `${KNOWLEDGE_ORDER_SQL} LIMIT ?`
+  binds.push(limit)
 
   const stmt = db.prepare(sql)
-  const bound = stmt.bind(...params)
+  const bound = stmt.bind(...binds)
   const result = await bound.all<KnowledgeRow & { session_name: string }>()
   return result.results
 }
@@ -506,18 +561,43 @@ export async function searchKnowledge(
 export async function listKnowledge(
   db: D1Database,
   accountId: string,
-  limit = 50,
+  params: Pick<KnowledgeSearchParams, 'repoKey' | 'kind' | 'status'> & { limit?: number } = {},
 ): Promise<Array<KnowledgeRow & { session_name: string }>> {
+  const {
+    repoKey,
+    kind,
+    status,
+    limit = 50,
+  } = params
+  let sql = `
+    SELECT k.*, s.name AS session_name
+    FROM knowledge k
+    LEFT JOIN agent_sessions s ON s.session_id = k.session_id
+    WHERE k.account_id = ?
+  `
+  const binds: Array<string | number> = [accountId]
+
+  if (repoKey) {
+    sql += ' AND k.repo_key = ?'
+    binds.push(repoKey)
+  }
+
+  if (kind) {
+    sql += ' AND k.kind = ?'
+    binds.push(kind)
+  }
+
+  if (status) {
+    sql += ' AND k.status = ?'
+    binds.push(status)
+  }
+
+  sql += `${KNOWLEDGE_ORDER_SQL} LIMIT ?`
+  binds.push(limit)
+
   const result = await db
-    .prepare(`
-      SELECT k.*, s.name AS session_name
-      FROM knowledge k
-      LEFT JOIN agent_sessions s ON s.session_id = k.session_id
-      WHERE k.account_id = ?
-      ORDER BY k.updated_at DESC
-      LIMIT ?
-    `)
-    .bind(accountId, limit)
+    .prepare(sql)
+    .bind(...binds)
     .all<KnowledgeRow & { session_name: string }>()
   return result.results
 }
@@ -541,8 +621,18 @@ export async function searchKnowledgeByCapability(
   const result = await db
     .prepare(`
       SELECT * FROM knowledge
-      WHERE account_id = ? AND capability = ? AND (topic LIKE ? OR content LIKE ?)
-      ORDER BY updated_at DESC
+      WHERE account_id = ?
+        AND capability = ?
+        AND status IN ('canonical', 'candidate')
+        AND (topic LIKE ? OR content LIKE ?)
+      ORDER BY
+        CASE status
+          WHEN 'canonical' THEN 0
+          WHEN 'candidate' THEN 1
+          ELSE 2
+        END ASC,
+        confidence DESC,
+        updated_at DESC
       LIMIT ?
     `)
     .bind(accountId, capability, like, like, limit)

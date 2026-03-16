@@ -94,7 +94,7 @@ export function createMcpServer(env: Env, account: AccountAuthContext): McpServe
   // ── write_knowledge ─────────────────────────────────────────────────────────
   server.tool(
     'write_knowledge',
-    'Write a knowledge entry to the shared store. All sessions on your account can search it. Use this to share insights about your repo, architecture decisions, or useful context.',
+    'Write a knowledge note to the shared store. Notes can be repo-scoped and include kind, status, confidence, freshness, and source refs. Use this to share reusable insights about your repo, architecture decisions, or useful context.',
     writeKnowledgeSchema.shape,
     async (input) => {
       try {
@@ -107,7 +107,7 @@ export function createMcpServer(env: Env, account: AccountAuthContext): McpServe
   // ── search_knowledge ────────────────────────────────────────────────────────
   server.tool(
     'search_knowledge',
-    'Search the shared knowledge store. Find insights written by any session on your account. Filter by query text or tags.',
+    'Search the shared knowledge store. Find repo-scoped notes written by any session on your account. Filter by query text, tags, repo_key, kind, or status.',
     searchKnowledgeSchema.shape,
     async (input) => {
       try {

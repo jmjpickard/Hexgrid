@@ -21,14 +21,21 @@ export interface AgentSession {
 
 export interface KnowledgeEntry {
   id: string
-  account_id: string
-  session_id: string
+  repo_key: string
+  kind: string
+  status: 'candidate' | 'canonical' | 'stale' | 'archived'
   topic: string
   content: string
   tags: string[]
+  source_refs: Array<{ path: string; note?: string }>
+  confidence: number
+  freshness: 'stable' | 'working' | 'volatile'
   session_name: string
   created_at: number
   updated_at: number
+  verified_at: number | null
+  expires_at: number | null
+  capability: string | null
 }
 
 export interface Connection {
@@ -85,8 +92,21 @@ export async function fetchSessions(): Promise<AgentSession[]> {
   return data.sessions
 }
 
-export async function fetchKnowledge(limit = 50): Promise<KnowledgeEntry[]> {
-  const res = await authFetch(`/api/knowledge?limit=${limit}`)
+export async function fetchKnowledge(filters?: {
+  limit?: number
+  query?: string
+  repo_key?: string
+  kind?: string
+  status?: 'candidate' | 'canonical' | 'stale' | 'archived'
+}): Promise<KnowledgeEntry[]> {
+  const params = new URLSearchParams()
+  params.set('limit', String(filters?.limit ?? 50))
+  if (filters?.query) params.set('query', filters.query)
+  if (filters?.repo_key) params.set('repo_key', filters.repo_key)
+  if (filters?.kind) params.set('kind', filters.kind)
+  if (filters?.status) params.set('status', filters.status)
+
+  const res = await authFetch(`/api/knowledge?${params.toString()}`)
   if (!res.ok) return []
   const data = await res.json() as { entries: KnowledgeEntry[] }
   return data.entries

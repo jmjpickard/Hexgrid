@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -42,6 +42,7 @@ Usage:
   hexgrid setup [all|codex|claude] [--mcp]
   hexgrid doctor [all|codex|claude] [--fix]
   hexgrid connect [--runtime RUNTIME] [--name NAME] [--description TEXT]
+  hexgrid onboard [--name NAME] [--description TEXT]
   hexgrid run <codex|claude> [--name NAME] [--description TEXT] [--heartbeat-seconds N] [-- ...agent args]
   hexgrid heartbeat [SESSION_ID]
   hexgrid disconnect [SESSION_ID]
@@ -183,6 +184,591 @@ function readJsonMaybe(filePath) {
   return readFile(filePath, 'utf8')
     .then(raw => JSON.parse(raw))
     .catch(() => null)
+}
+
+function uniq(items) {
+  return Array.from(new Set(items.filter(Boolean)))
+}
+
+function limitItems(items, max = 10) {
+  return items.slice(0, max)
+}
+
+function formatInlineList(items, fallback = 'none') {
+  return items.length > 0 ? items.join(', ') : fallback
+}
+
+function formatBulletList(items, fallback = '- none detected') {
+  return items.length > 0 ? items.map(item => `- ${item}`).join('\n') : fallback
+}
+
+function truncateText(input, max = 4000) {
+  if (!input || input.length <= max) return input
+  return `${input.slice(0, Math.max(0, max - 3))}...`
+}
+
+function humaniseLabel(input) {
+  return input.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+async function listDirEntries(dirPath) {
+  try {
+    return await readdir(dirPath, { withFileTypes: true })
+  } catch {
+    return []
+  }
+}
+
+function detectPackageFrameworks(pkg, hasWrangler) {
+  const deps = {
+    ...(pkg?.dependencies ?? {}),
+    ...(pkg?.devDependencies ?? {}),
+  }
+  const frameworks = []
+
+  if (deps.next) frameworks.push('nextjs')
+  if (deps.react) frameworks.push('react')
+  if (deps.vite) frameworks.push('vite')
+  if (deps.typescript) frameworks.push('typescript')
+  if (deps['@modelcontextprotocol/sdk']) frameworks.push('mcp')
+  if (deps.wrangler || hasWrangler) frameworks.push('cloudflare-worker')
+  if (deps.tailwindcss) frameworks.push('tailwindcss')
+  if (deps.zod) frameworks.push('zod')
+
+  return uniq(frameworks)
+}
+
+async function detectProjectUnit(repoRoot, relPath) {
+  const absPath = relPath === '.' ? repoRoot : path.join(repoRoot, relPath)
+  const packageJsonPath = path.join(absPath, 'package.json')
+  const pyprojectPath = path.join(absPath, 'pyproject.toml')
+  const cargoPath = path.join(absPath, 'Cargo.toml')
+  const goModPath = path.join(absPath, 'go.mod')
+  const dockerPath = path.join(absPath, 'Dockerfile')
+  const wranglerPath = path.join(absPath, 'wrangler.toml')
+
+  const [
+    packageJson,
+    hasPyproject,
+    hasCargo,
+    hasGoMod,
+    hasDocker,
+    hasWrangler,
+  ] = await Promise.all([
+    readJsonMaybe(packageJsonPath),
+    fileExists(pyprojectPath),
+    fileExists(cargoPath),
+    fileExists(goModPath),
+    fileExists(dockerPath),
+    fileExists(wranglerPath),
+  ])
+
+  if (!packageJson && !hasPyproject && !hasCargo && !hasGoMod && !hasDocker && !hasWrangler) {
+    return null
+  }
+
+  if (packageJson) {
+    const workspaceConfig = packageJson.workspaces
+    const workspaces = Array.isArray(workspaceConfig)
+      ? workspaceConfig
+      : Array.isArray(workspaceConfig?.packages)
+        ? workspaceConfig.packages
+        : []
+
+    return {
+      path: relPath,
+      name: packageJson.name ?? (relPath === '.' ? path.basename(repoRoot) : path.basename(relPath)),
+      ecosystem: 'node',
+      scripts: Object.keys(packageJson.scripts ?? {}),
+      frameworks: detectPackageFrameworks(packageJson, hasWrangler),
+      workspaces,
+      hasDocker,
+      hasWrangler,
+      source_ref: relPath === '.' ? 'package.json' : path.posix.join(relPath, 'package.json'),
+    }
+  }
+
+  if (hasPyproject) {
+    return {
+      path: relPath,
+      name: path.basename(absPath),
+      ecosystem: 'python',
+      scripts: [],
+      frameworks: ['python'],
+      workspaces: [],
+      hasDocker,
+      hasWrangler,
+      source_ref: relPath === '.' ? 'pyproject.toml' : path.posix.join(relPath, 'pyproject.toml'),
+    }
+  }
+
+  if (hasCargo) {
+    return {
+      path: relPath,
+      name: path.basename(absPath),
+      ecosystem: 'rust',
+      scripts: [],
+      frameworks: ['rust'],
+      workspaces: [],
+      hasDocker,
+      hasWrangler,
+      source_ref: relPath === '.' ? 'Cargo.toml' : path.posix.join(relPath, 'Cargo.toml'),
+    }
+  }
+
+  if (hasGoMod) {
+    return {
+      path: relPath,
+      name: path.basename(absPath),
+      ecosystem: 'go',
+      scripts: [],
+      frameworks: ['go'],
+      workspaces: [],
+      hasDocker,
+      hasWrangler,
+      source_ref: relPath === '.' ? 'go.mod' : path.posix.join(relPath, 'go.mod'),
+    }
+  }
+
+  return {
+    path: relPath,
+    name: path.basename(absPath),
+    ecosystem: hasWrangler ? 'cloudflare' : 'container',
+    scripts: [],
+    frameworks: uniq([
+      hasWrangler ? 'cloudflare-worker' : null,
+      hasDocker ? 'docker' : null,
+    ]),
+    workspaces: [],
+    hasDocker,
+    hasWrangler,
+    source_ref: hasWrangler
+      ? (relPath === '.' ? 'wrangler.toml' : path.posix.join(relPath, 'wrangler.toml'))
+      : (relPath === '.' ? 'Dockerfile' : path.posix.join(relPath, 'Dockerfile')),
+  }
+}
+
+async function detectProjectUnits(repoRoot) {
+  const units = []
+  const rootUnit = await detectProjectUnit(repoRoot, '.')
+  if (rootUnit) units.push(rootUnit)
+
+  const rootEntries = await listDirEntries(repoRoot)
+  const childDirs = rootEntries
+    .filter(entry => entry.isDirectory() && (!entry.name.startsWith('.') || entry.name === '.github'))
+    .map(entry => entry.name)
+
+  for (const dirName of childDirs) {
+    const unit = await detectProjectUnit(repoRoot, dirName)
+    if (unit) units.push(unit)
+  }
+
+  return units
+}
+
+function detectPackageManagers(repoRoot) {
+  const managers = []
+  if (spawnSync('sh', ['-lc', `[ -f "${path.join(repoRoot, 'pnpm-lock.yaml')}" ]`]).status === 0) managers.push('pnpm')
+  if (spawnSync('sh', ['-lc', `[ -f "${path.join(repoRoot, 'bun.lockb')}" ] || [ -f "${path.join(repoRoot, 'bun.lock')}" ]`]).status === 0) managers.push('bun')
+  if (spawnSync('sh', ['-lc', `[ -f "${path.join(repoRoot, 'yarn.lock')}" ]`]).status === 0) managers.push('yarn')
+  if (spawnSync('sh', ['-lc', `[ -f "${path.join(repoRoot, 'package-lock.json')}" ]`]).status === 0) managers.push('npm')
+  if (spawnSync('sh', ['-lc', `[ -f "${path.join(repoRoot, 'uv.lock')}" ]`]).status === 0) managers.push('uv')
+  if (spawnSync('sh', ['-lc', `[ -f "${path.join(repoRoot, 'poetry.lock')}" ]`]).status === 0) managers.push('poetry')
+  return uniq(managers)
+}
+
+function detectLanguages(repoRoot) {
+  const tracked = runGit(['-C', repoRoot, 'ls-files'])
+  const files = tracked ? tracked.split('\n').filter(Boolean).slice(0, 4000) : []
+  const counts = new Map()
+  const extensions = {
+    '.ts': 'TypeScript',
+    '.tsx': 'TypeScript',
+    '.js': 'JavaScript',
+    '.jsx': 'JavaScript',
+    '.py': 'Python',
+    '.go': 'Go',
+    '.rs': 'Rust',
+    '.sql': 'SQL',
+    '.css': 'CSS',
+    '.scss': 'SCSS',
+    '.html': 'HTML',
+    '.md': 'Markdown',
+    '.toml': 'TOML',
+    '.yml': 'YAML',
+    '.yaml': 'YAML',
+  }
+
+  for (const file of files) {
+    const ext = path.extname(file).toLowerCase()
+    const label = extensions[ext]
+    if (!label) continue
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([label]) => label)
+    .slice(0, 6)
+}
+
+async function readReadmeSummary(repoRoot) {
+  const candidates = ['README.md', 'README.mdx', 'README']
+
+  for (const fileName of candidates) {
+    const absPath = path.join(repoRoot, fileName)
+    if (!(await fileExists(absPath))) continue
+    const raw = await readFile(absPath, 'utf8')
+    const lines = raw.split(/\r?\n/)
+    const paragraph = []
+    let started = false
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) {
+        if (started) break
+        continue
+      }
+      if (!started && trimmed.startsWith('#')) continue
+      started = true
+      paragraph.push(trimmed)
+    }
+
+    return paragraph.length > 0 ? truncateText(paragraph.join(' '), 500) : null
+  }
+
+  return null
+}
+
+async function detectWorkflows(repoRoot) {
+  const workflowDir = path.join(repoRoot, '.github', 'workflows')
+  const entries = await listDirEntries(workflowDir)
+  return entries
+    .filter(entry => entry.isFile() && (entry.name.endsWith('.yml') || entry.name.endsWith('.yaml')))
+    .map(entry => entry.name)
+    .sort()
+}
+
+async function detectEnvExamples(repoRoot) {
+  const envFiles = []
+  const rootEntries = await listDirEntries(repoRoot)
+
+  for (const entry of rootEntries) {
+    if (entry.isFile() && entry.name.includes('.env') && entry.name.includes('example')) {
+      envFiles.push(entry.name)
+    }
+    if (entry.isDirectory() && !entry.name.startsWith('.')) {
+      const nestedEntries = await listDirEntries(path.join(repoRoot, entry.name))
+      for (const nested of nestedEntries) {
+        if (nested.isFile() && nested.name.includes('.env') && nested.name.includes('example')) {
+          envFiles.push(path.posix.join(entry.name, nested.name))
+        }
+      }
+    }
+  }
+
+  return uniq(envFiles).sort()
+}
+
+async function listTopLevelEntries(repoRoot) {
+  const entries = await listDirEntries(repoRoot)
+  const dirs = []
+  const files = []
+
+  for (const entry of entries) {
+    if (entry.name === '.git') continue
+    if (entry.isDirectory()) dirs.push(entry.name)
+    if (entry.isFile()) files.push(entry.name)
+  }
+
+  return {
+    dirs: dirs.sort(),
+    files: files.sort(),
+  }
+}
+
+function buildGlossaryTerms(context, units, topLevelDirs) {
+  return uniq([
+    context.repoName,
+    ...units.map(unit => unit.name),
+    ...units.map(unit => unit.path === '.' ? null : unit.path),
+    ...topLevelDirs.filter(name => !name.startsWith('.')),
+  ])
+    .map(term => term.trim())
+    .filter(Boolean)
+    .slice(0, 15)
+}
+
+async function analyzeRepoForOnboarding(context) {
+  const [
+    units,
+    readmeSummary,
+    workflows,
+    envExamples,
+    topLevel,
+  ] = await Promise.all([
+    detectProjectUnits(context.repoRoot),
+    readReadmeSummary(context.repoRoot),
+    detectWorkflows(context.repoRoot),
+    detectEnvExamples(context.repoRoot),
+    listTopLevelEntries(context.repoRoot),
+  ])
+
+  const packageManagers = detectPackageManagers(context.repoRoot)
+  const languages = detectLanguages(context.repoRoot)
+  const glossaryTerms = buildGlossaryTerms(context, units, topLevel.dirs)
+
+  return {
+    units,
+    readmeSummary,
+    workflows,
+    envExamples,
+    topLevel,
+    packageManagers,
+    languages,
+    glossaryTerms,
+  }
+}
+
+function buildRepoBriefNote(context, analysis) {
+  const lines = [
+    '# Repo Brief',
+    '',
+    `- Repo: \`${context.repoName}\``,
+    `- Repo URL: \`${context.repoUrl}\``,
+    `- Repo type: \`${context.repoType}\``,
+    `- Package managers: ${formatInlineList(analysis.packageManagers)}`,
+    `- Languages: ${formatInlineList(analysis.languages)}`,
+    `- Top-level directories: ${formatInlineList(limitItems(analysis.topLevel.dirs, 12))}`,
+    `- CI workflows: ${formatInlineList(limitItems(analysis.workflows, 10))}`,
+    '',
+  ]
+
+  if (analysis.readmeSummary) {
+    lines.push('## README summary', '', analysis.readmeSummary, '')
+  }
+
+  lines.push('## Detected surfaces', '')
+  lines.push(formatBulletList(
+    analysis.units.map(unit => {
+      const location = unit.path === '.' ? 'repo root' : unit.path
+      const frameworks = unit.frameworks.length > 0 ? ` using ${unit.frameworks.join(', ')}` : ''
+      return `\`${location}\`: ${unit.ecosystem}${frameworks}`
+    }),
+    '- no runnable surfaces detected from manifests',
+  ))
+
+  return {
+    topic: 'Repo brief',
+    kind: 'repo-brief',
+    status: 'canonical',
+    confidence: 0.92,
+    freshness: 'stable',
+    tags: ['onboarding', context.repoName, context.repoType],
+    source_refs: uniq([
+      analysis.readmeSummary ? 'README.md' : null,
+      ...analysis.units.map(unit => unit.source_ref),
+    ]).map(source => ({ path: source })),
+    content: truncateText(lines.join('\n').trim(), 4800),
+  }
+}
+
+function buildArchitectureNote(context, analysis) {
+  const unitBullets = analysis.units.map(unit => {
+    const location = unit.path === '.' ? 'repo root' : unit.path
+    const frameworks = unit.frameworks.length > 0 ? `; frameworks: ${unit.frameworks.join(', ')}` : ''
+    const scripts = unit.scripts.length > 0 ? `; scripts: ${unit.scripts.slice(0, 6).join(', ')}` : ''
+    const workspaces = unit.workspaces.length > 0 ? `; workspaces: ${unit.workspaces.join(', ')}` : ''
+    return `\`${location}\`: ${unit.ecosystem}${frameworks}${scripts}${workspaces}`
+  })
+
+  const content = truncateText([
+    '# Architecture',
+    '',
+    'This note is heuristic and should be reviewed after a deeper local investigation.',
+    '',
+    '## Detected units',
+    '',
+    formatBulletList(unitBullets, '- no architecture units detected from manifests'),
+    '',
+    '## Top-level layout',
+    '',
+    formatBulletList(limitItems(analysis.topLevel.dirs, 15).map(dir => `\`${dir}\``), '- no top-level directories detected'),
+  ].join('\n').trim(), 4800)
+
+  return {
+    topic: 'Architecture overview',
+    kind: 'architecture',
+    status: 'candidate',
+    confidence: 0.72,
+    freshness: 'working',
+    tags: ['onboarding', 'architecture', context.repoName],
+    source_refs: analysis.units.map(unit => ({ path: unit.source_ref })),
+    content,
+  }
+}
+
+function buildCommandsNote(context, analysis) {
+  const sections = []
+
+  for (const unit of analysis.units) {
+    if (unit.scripts.length === 0) continue
+    const title = unit.path === '.' ? 'root' : unit.path
+    sections.push(`## ${title}`)
+    sections.push('')
+    for (const scriptName of unit.scripts.slice(0, 12)) {
+      const commandPrefix = analysis.packageManagers[0] === 'pnpm'
+        ? 'pnpm'
+        : analysis.packageManagers[0] === 'yarn'
+          ? 'yarn'
+          : analysis.packageManagers[0] === 'bun'
+            ? 'bun run'
+            : 'npm run'
+      const scriptCommand = commandPrefix === 'yarn'
+        ? `yarn ${scriptName}`
+        : `${commandPrefix} ${scriptName}`
+      sections.push(`- \`${scriptCommand}\``)
+    }
+    sections.push('')
+  }
+
+  if (sections.length === 0) {
+    sections.push('No package scripts were detected from the current manifests.')
+  }
+
+  return {
+    topic: 'Commands',
+    kind: 'commands',
+    status: 'canonical',
+    confidence: 0.97,
+    freshness: 'working',
+    tags: ['onboarding', 'commands', context.repoName],
+    source_refs: analysis.units.map(unit => ({ path: unit.source_ref })),
+    content: truncateText([
+      '# Commands',
+      '',
+      `Primary package managers detected: ${formatInlineList(analysis.packageManagers)}`,
+      '',
+      ...sections,
+    ].join('\n').trim(), 4800),
+  }
+}
+
+function buildGlossaryNote(context, analysis) {
+  const glossaryBullets = analysis.glossaryTerms.map(term => {
+    const matchingUnit = analysis.units.find(unit => unit.name === term || unit.path === term)
+    if (matchingUnit) {
+      const detail = matchingUnit.path === '.' ? 'repo root unit' : `unit at \`${matchingUnit.path}\``
+      return `\`${term}\`: ${detail}`
+    }
+    return `\`${term}\`: detected project term from the repo layout`
+  })
+
+  return {
+    topic: 'Glossary',
+    kind: 'glossary',
+    status: 'candidate',
+    confidence: 0.61,
+    freshness: 'stable',
+    tags: ['onboarding', 'glossary', context.repoName],
+    source_refs: analysis.units.map(unit => ({ path: unit.source_ref })),
+    content: truncateText([
+      '# Glossary',
+      '',
+      'These terms were inferred from package names and top-level structure.',
+      '',
+      formatBulletList(glossaryBullets, '- no glossary terms inferred'),
+    ].join('\n').trim(), 4800),
+  }
+}
+
+function buildPitfallsNote(context, analysis) {
+  const pitfalls = []
+
+  if (analysis.units.length > 1) {
+    pitfalls.push(`This repo has multiple runnable surfaces (${analysis.units.map(unit => `\`${unit.path === '.' ? 'root' : unit.path}\``).join(', ')}); local setup may require starting more than one service.`)
+  }
+  if (analysis.units.some(unit => unit.hasWrangler)) {
+    pitfalls.push('Cloudflare Wrangler is present; local development may depend on Worker/D1 configuration and applied schema.')
+  }
+  if (analysis.envExamples.length === 0) {
+    pitfalls.push('No environment example files were detected during onboarding; verify required secrets and local env setup manually.')
+  }
+  if (analysis.packageManagers.length > 1) {
+    pitfalls.push(`Multiple package managers were detected (${analysis.packageManagers.join(', ')}); follow the repo convention before installing or running scripts.`)
+  }
+
+  return {
+    topic: 'Pitfalls',
+    kind: 'pitfall',
+    status: 'candidate',
+    confidence: pitfalls.length > 0 ? 0.68 : 0.55,
+    freshness: 'working',
+    tags: ['onboarding', 'pitfalls', context.repoName],
+    source_refs: uniq([
+      ...analysis.units.filter(unit => unit.hasWrangler).map(unit => unit.path === '.' ? 'wrangler.toml' : path.posix.join(unit.path, 'wrangler.toml')),
+      ...analysis.envExamples,
+    ]).map(source => ({ path: source })),
+    content: truncateText([
+      '# Pitfalls',
+      '',
+      pitfalls.length > 0
+        ? formatBulletList(pitfalls)
+        : 'No strong pitfalls were inferred from the manifest scan. Verify deployment, environment, and data requirements manually.',
+    ].join('\n').trim(), 4800),
+  }
+}
+
+function buildOpenQuestionsNote(context, analysis) {
+  const questions = []
+
+  if (!analysis.readmeSummary) {
+    questions.push('No readable top-level README summary was detected. Add or verify a high-signal entry point for new contributors and agents.')
+  }
+  if (analysis.workflows.length === 0) {
+    questions.push('No CI workflows were detected. Verify how linting, tests, and deploys are expected to run.')
+  }
+  if (analysis.units.every(unit => unit.scripts.every(script => !/test/i.test(script)))) {
+    questions.push('No obvious test script was detected from the current package manifests. Confirm the expected validation path.')
+  }
+  if (analysis.envExamples.length === 0) {
+    questions.push('Required environment variables are unclear from the current repo scan.')
+  }
+
+  return {
+    topic: 'Open questions',
+    kind: 'open-question',
+    status: 'candidate',
+    confidence: 0.7,
+    freshness: 'working',
+    tags: ['onboarding', 'open-questions', context.repoName],
+    source_refs: uniq([
+      analysis.readmeSummary ? 'README.md' : null,
+      ...analysis.units.map(unit => unit.source_ref),
+      ...analysis.workflows.map(file => path.posix.join('.github/workflows', file)),
+    ]).map(source => ({ path: source })),
+    content: truncateText([
+      '# Open Questions',
+      '',
+      questions.length > 0
+        ? formatBulletList(questions)
+        : 'No immediate open questions were inferred from the heuristic scan.',
+    ].join('\n').trim(), 4800),
+  }
+}
+
+async function generateOnboardingNotes(context) {
+  const analysis = await analyzeRepoForOnboarding(context)
+  const notes = [
+    buildRepoBriefNote(context, analysis),
+    buildArchitectureNote(context, analysis),
+    buildCommandsNote(context, analysis),
+    buildGlossaryNote(context, analysis),
+    buildPitfallsNote(context, analysis),
+    buildOpenQuestionsNote(context, analysis),
+  ]
+
+  return { analysis, notes }
 }
 
 async function detectRepoContext() {
@@ -571,6 +1157,20 @@ async function disconnectRepoSession({ config, apiUrl, token, sessionId, repoRoo
   return disconnect.data
 }
 
+async function writeKnowledgeNote(apiUrl, token, body) {
+  const write = await requestJson(apiUrl, '/api/cli/knowledge', {
+    method: 'POST',
+    token,
+    body,
+  })
+
+  if (!write.response.ok) {
+    throw new Error(write.data.error ?? `Knowledge write failed (${write.response.status})`)
+  }
+
+  return write.data
+}
+
 async function commandSetup(args) {
   const { primary } = splitPassthroughArgs(args)
   const config = await loadConfig()
@@ -713,6 +1313,97 @@ async function commandConnect(args) {
     repo: context.repoName,
     runtime,
   }, null, 2))
+}
+
+async function commandOnboard(args) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl(args, config)
+  const token = resolveToken(config)
+  await assertApiHealthy(apiUrl)
+  await assertLoggedIn(apiUrl, token)
+
+  const context = await detectRepoContext()
+  const name = parseFlag(args, '--name', `${context.repoName}-onboard`)
+  const description = parseFlag(
+    args,
+    '--description',
+    `onboarding session for ${context.repoName}`,
+  )
+
+  const connected = await connectRepoSession({
+    config,
+    apiUrl,
+    token,
+    context,
+    runtime: 'onboard',
+    name,
+    description,
+  })
+
+  const sessionId = connected.session_id
+
+  try {
+    const { analysis, notes } = await generateOnboardingNotes(context)
+    const created = []
+    const capability = `repo:${context.repoName}`
+
+    for (const note of notes) {
+      const result = await writeKnowledgeNote(apiUrl, token, {
+        session_id: sessionId,
+        repo_url: context.repoUrl,
+        topic: note.topic,
+        content: note.content,
+        tags: note.tags,
+        kind: note.kind,
+        status: note.status,
+        confidence: note.confidence,
+        freshness: note.freshness,
+        source_refs: note.source_refs,
+        capability,
+      })
+
+      created.push({
+        id: result.id,
+        topic: result.topic,
+        kind: result.kind,
+        status: result.status,
+      })
+    }
+
+    console.log(JSON.stringify({
+      ok: true,
+      repo: context.repoName,
+      repo_url: context.repoUrl,
+      session_id: sessionId,
+      capability,
+      created,
+      needs_review: created.filter(note => note.status !== 'canonical').map(note => note.topic),
+      summary: {
+        repo_type: context.repoType,
+        units: analysis.units.map(unit => ({
+          path: unit.path,
+          ecosystem: unit.ecosystem,
+          frameworks: unit.frameworks,
+        })),
+        package_managers: analysis.packageManagers,
+        languages: analysis.languages,
+      },
+    }, null, 2))
+  } finally {
+    try {
+      const latestConfig = await loadConfig()
+      await disconnectRepoSession({
+        config: latestConfig,
+        apiUrl,
+        token,
+        sessionId,
+        repoRoot: context.repoRoot,
+      })
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.error(`Warning: failed to disconnect onboarding session ${sessionId} (${detail})`)
+    }
+  }
 }
 
 async function commandRun(args) {
@@ -1387,6 +2078,10 @@ async function main() {
   }
   if (command === 'connect') {
     await commandConnect(args)
+    return
+  }
+  if (command === 'onboard') {
+    await commandOnboard(args)
     return
   }
   if (command === 'run') {

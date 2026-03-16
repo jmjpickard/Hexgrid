@@ -21,7 +21,6 @@ import {
   getSessionUserByTokenHash,
   getUserByAccountApiKeyHash,
   getUserByEmail,
-  listKnowledge,
   markUserEmailVerified,
   revokeCliTokenByHash,
   revokeSessionByTokenHash,
@@ -67,6 +66,12 @@ import {
   respond,
   respondSchema,
 } from './tools/messaging'
+import {
+  searchKnowledge,
+  searchKnowledgeSchema,
+  writeKnowledge,
+  writeKnowledgeSchema,
+} from './tools/knowledge'
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -478,13 +483,20 @@ export default {
     if (url.pathname === '/api/knowledge' && request.method === 'GET') {
       try {
         const user = await requireSessionUser(request, env)
-        const limit = Math.min(Number(url.searchParams.get('limit') ?? '50'), 100)
-        const entries = await listKnowledge(env.DB, user.user_id, limit)
-        const mapped = entries.map(e => ({
-          ...e,
-          tags: JSON.parse(e.tags),
-        }))
-        return jsonResponse({ entries: mapped })
+        const requestedLimit = Number(url.searchParams.get('limit') ?? '50')
+        const tags = (url.searchParams.get('tags') ?? '')
+          .split(',')
+          .map(tag => tag.trim())
+          .filter(Boolean)
+        const result = await searchKnowledge({
+          query: url.searchParams.get('query') ?? undefined,
+          tags: tags.length > 0 ? tags : undefined,
+          repo_key: url.searchParams.get('repo_key') ?? undefined,
+          kind: url.searchParams.get('kind') ?? undefined,
+          status: (url.searchParams.get('status') ?? undefined) as 'candidate' | 'canonical' | 'stale' | 'archived' | undefined,
+          limit: Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 100) : 50,
+        }, env, { account_id: user.user_id })
+        return jsonResponse(result)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400
         return jsonResponse({ error: errorMessage(err) }, status)
@@ -598,6 +610,30 @@ export default {
         const { user } = await requireCliUser(request, env)
         const body = connectSessionSchema.parse(await request.json())
         const result = await connectSession({ ...body, is_listener: true }, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/knowledge' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = writeKnowledgeSchema.parse(await request.json())
+        const result = await writeKnowledge(body, env, { account_id: user.user_id })
+        return jsonResponse(result)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400
+        return jsonResponse({ error: errorMessage(err) }, status)
+      }
+    }
+
+    if (url.pathname === '/api/cli/knowledge/search' && request.method === 'POST') {
+      try {
+        const { user } = await requireCliUser(request, env)
+        const body = searchKnowledgeSchema.parse(await request.json())
+        const result = await searchKnowledge(body, env, { account_id: user.user_id })
         return jsonResponse(result)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400

@@ -12,6 +12,7 @@ import type {
   RespondOutput,
 } from '../lib/types'
 import { nowUnix } from '../lib/auth'
+import { normaliseRepoUrl } from '../lib/repo'
 import {
   answerMessage,
   deleteOldAnsweredMessages,
@@ -315,11 +316,19 @@ export async function respond(
         id: knowledgeId,
         account_id: account.account_id,
         session_id: input.session_id,
+        repo_key: session.repo_url ? normaliseRepoUrl(session.repo_url) : '',
+        kind: 'qa',
+        status: 'canonical',
         topic,
         content: clean,
         tags: JSON.stringify([msg.capability]),
+        source_refs: JSON.stringify([]),
+        confidence: 0.8,
+        freshness: 'working',
         created_at: now,
         updated_at: now,
+        verified_at: now,
+        expires_at: null,
         source_message_id: msg.id,
         capability: msg.capability,
       }).catch(() => {})

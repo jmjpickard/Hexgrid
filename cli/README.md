@@ -14,6 +14,7 @@ npm install -g @jackpickard/hexgrid-cli
 hexgrid login
 hexgrid setup
 hexgrid doctor --fix
+hexgrid onboard
 hexgrid run codex
 # or
 hexgrid run claude
@@ -56,8 +57,9 @@ hexgrid update
 ## Recommended UX
 
 1. `hexgrid login` once per machine.
-2. In each repo, run `hexgrid run codex` or `hexgrid run claude`.
-3. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
+2. In each repo, run `hexgrid onboard` once to publish a first-pass repo dossier.
+3. Start a live session with `hexgrid run codex` or `hexgrid run claude`.
+4. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
 
 ## Update CLI
 

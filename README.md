@@ -192,6 +192,7 @@ hexgrid login
 # one-time per repo (auto MCP setup + validation)
 hexgrid setup
 hexgrid doctor --fix
+hexgrid onboard
 
 # start the agent with supervised session lifecycle
 hexgrid run codex
@@ -219,6 +220,8 @@ Device-flow endpoints used by CLI:
 CLI session endpoints:
 
 - `POST /api/cli/connect`
+- `POST /api/cli/knowledge`
+- `POST /api/cli/knowledge/search`
 - `POST /api/cli/heartbeat`
 - `POST /api/cli/disconnect`
 - `POST /api/cli/logout`

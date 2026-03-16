@@ -113,11 +113,19 @@ CREATE TABLE IF NOT EXISTS knowledge (
   id                TEXT PRIMARY KEY,
   account_id        TEXT NOT NULL,
   session_id        TEXT NOT NULL,
+  repo_key          TEXT NOT NULL DEFAULT '',
+  kind              TEXT NOT NULL DEFAULT 'note',
+  status            TEXT NOT NULL DEFAULT 'canonical',
   topic             TEXT NOT NULL,
   content           TEXT NOT NULL,
   tags              TEXT NOT NULL DEFAULT '[]',
+  source_refs       TEXT NOT NULL DEFAULT '[]',
+  confidence        REAL NOT NULL DEFAULT 0.7,
+  freshness         TEXT NOT NULL DEFAULT 'working',
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL,
+  verified_at       INTEGER,
+  expires_at        INTEGER,
   source_message_id TEXT,
   capability        TEXT,
   FOREIGN KEY (account_id) REFERENCES users(user_id),
@@ -127,6 +135,8 @@ CREATE TABLE IF NOT EXISTS knowledge (
 CREATE INDEX IF NOT EXISTS idx_knowledge_account ON knowledge(account_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge(account_id, topic);
 CREATE INDEX IF NOT EXISTS idx_knowledge_capability ON knowledge(account_id, capability);
+CREATE INDEX IF NOT EXISTS idx_knowledge_repo_status ON knowledge(account_id, repo_key, status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_kind_status ON knowledge(account_id, kind, status);
 
 -- ─── MESSAGES ────────────────────────────────────────────────────────────────
 -- Async request/response between agent sessions.
