@@ -8,6 +8,7 @@ import type {
   DeviceAuthRequestRow,
   KnowledgeRow,
   MessageRow,
+  RepoHexClaimRow,
   SessionUser,
   UserRow,
 } from '../lib/types'
@@ -270,6 +271,78 @@ export async function setAccountApiKey(
     .prepare('UPDATE users SET account_api_key_hash = ?, account_api_key_prefix = ? WHERE user_id = ?')
     .bind(keyHash, keyPrefix, userId)
     .run()
+}
+
+// ─── REPO HEX CLAIMS ─────────────────────────────────────────────────────────
+
+export async function getRepoHexClaim(
+  db: D1Database,
+  accountId: string,
+  repoKey: string,
+): Promise<RepoHexClaimRow | null> {
+  const result = await db
+    .prepare(`
+      SELECT *
+      FROM repo_hex_claims
+      WHERE account_id = ? AND repo_key = ? AND released_at IS NULL
+      LIMIT 1
+    `)
+    .bind(accountId, repoKey)
+    .first<RepoHexClaimRow>()
+  return result ?? null
+}
+
+export async function upsertRepoHexClaim(db: D1Database, claim: RepoHexClaimRow): Promise<void> {
+  await db
+    .prepare(`
+      INSERT INTO repo_hex_claims (
+        account_id, repo_key, repo_url, hex_id, created_at, last_seen_at, released_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, repo_key) DO UPDATE SET
+        repo_url = excluded.repo_url,
+        hex_id = excluded.hex_id,
+        last_seen_at = excluded.last_seen_at,
+        released_at = NULL
+    `)
+    .bind(
+      claim.account_id,
+      claim.repo_key,
+      claim.repo_url,
+      claim.hex_id,
+      claim.created_at,
+      claim.last_seen_at,
+      claim.released_at,
+    )
+    .run()
+}
+
+export async function getLatestSessionForRepoUrl(
+  db: D1Database,
+  accountId: string,
+  repoUrl: string,
+): Promise<{ hex_id: string } | null> {
+  const result = await db
+    .prepare(`
+      SELECT hex_id
+      FROM agent_sessions
+      WHERE account_id = ? AND repo_url = ?
+      ORDER BY connected_at DESC
+      LIMIT 1
+    `)
+    .bind(accountId, repoUrl)
+    .first<{ hex_id: string }>()
+  return result ?? null
+}
+
+export async function getAllReservedHexIds(db: D1Database): Promise<Set<string>> {
+  const result = await db
+    .prepare(`
+      SELECT hex_id FROM agent_sessions WHERE status = 'active'
+      UNION
+      SELECT hex_id FROM repo_hex_claims WHERE released_at IS NULL
+    `)
+    .all<{ hex_id: string }>()
+  return new Set(result.results.map(row => row.hex_id))
 }
 
 // ─── AGENT SESSIONS ──────────────────────────────────────────────────────────

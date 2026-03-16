@@ -21,7 +21,6 @@ import {
   getSessionUserByTokenHash,
   getUserByAccountApiKeyHash,
   getUserByEmail,
-  listAllSessions,
   listKnowledge,
   markUserEmailVerified,
   revokeCliTokenByHash,
@@ -467,8 +466,8 @@ export default {
     if (url.pathname === '/api/sessions' && request.method === 'GET') {
       try {
         const user = await requireSessionUser(request, env)
-        const sessions = await listAllSessions(env.DB, user.user_id)
-        return jsonResponse({ sessions })
+        const result = await listSessions(env, { account_id: user.user_id })
+        return jsonResponse(result)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400
         return jsonResponse({ error: errorMessage(err) }, status)

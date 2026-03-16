@@ -55,6 +55,16 @@ export interface CliTokenRow {
   revoked_at: number | null
 }
 
+export interface RepoHexClaimRow {
+  account_id: string
+  repo_key: string
+  repo_url: string
+  hex_id: string
+  created_at: number
+  last_seen_at: number
+  released_at: number | null
+}
+
 export interface AgentSessionRow {
   session_id: string
   account_id: string
@@ -186,12 +196,18 @@ export interface HeartbeatOutput {
 export interface ListSessionsOutput {
   sessions: Array<{
     session_id: string
+    account_id: string
     name: string
     repo_url: string | null
     description: string | null
+    capabilities: string
     hex_id: string
     status: SessionStatus
+    last_heartbeat: number
     connected_at: number
+    disconnected_at: number | null
+    hex_center_lat: number
+    hex_center_lng: number
   }>
 }
 

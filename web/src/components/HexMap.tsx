@@ -1,11 +1,21 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import * as d3 from 'd3'
-import { fetchSessions, fetchConnections, type AgentSession, type Connection } from '@/lib/api'
+import { fetchConnections, fetchSessions, type AgentSession, type Connection } from '@/lib/api'
 
 interface HexMapProps {
   onSelectSession?: (session: AgentSession | null) => void
+}
+
+interface HexCluster {
+  hex_id: string
+  sessions: AgentSession[]
+  primary: AgentSession
+  lat: number
+  lng: number
+  x: number
+  y: number
 }
 
 const ACTIVE_COLOUR = '#3B82F6'
@@ -37,6 +47,87 @@ function hexPath(size: number): string {
   return `M ${points.join(' L ')} Z`
 }
 
+function rankSessions(a: AgentSession, b: AgentSession): number {
+  if (b.last_heartbeat !== a.last_heartbeat) return b.last_heartbeat - a.last_heartbeat
+  return b.connected_at - a.connected_at
+}
+
+function buildHexClusters(sessions: AgentSession[]): HexCluster[] {
+  const grouped = new Map<string, AgentSession[]>()
+
+  for (const session of [...sessions].sort(rankSessions)) {
+    const list = grouped.get(session.hex_id)
+    if (list) list.push(session)
+    else grouped.set(session.hex_id, [session])
+  }
+
+  return Array.from(grouped.entries()).map(([hex_id, clusterSessions]) => {
+    const primary = [...clusterSessions].sort(rankSessions)[0]
+    return {
+      hex_id,
+      sessions: clusterSessions,
+      primary: { ...primary, stack_count: clusterSessions.length },
+      lat: primary.hex_center_lat,
+      lng: primary.hex_center_lng,
+      x: 0,
+      y: 0,
+    }
+  })
+}
+
+function projectHexClusters(clusters: HexCluster[], width: number, height: number): HexCluster[] {
+  const innerWidth = Math.max(width - HEX_SIZE * 2, HEX_SIZE * 6)
+  const innerHeight = Math.max(height - HEX_SIZE * 2, HEX_SIZE * 6)
+
+  if (clusters.length === 0) return []
+  if (clusters.length === 1) {
+    return [{ ...clusters[0], x: innerWidth / 2, y: innerHeight / 2 }]
+  }
+
+  const referenceLat = d3.mean(clusters, cluster => cluster.lat) ?? 0
+  const projected = clusters.map(cluster => ({
+    cluster,
+    rawX: cluster.lng * Math.cos((referenceLat * Math.PI) / 180),
+    rawY: -cluster.lat,
+  }))
+
+  const minX = d3.min(projected, point => point.rawX) ?? 0
+  const maxX = d3.max(projected, point => point.rawX) ?? 0
+  const minY = d3.min(projected, point => point.rawY) ?? 0
+  const maxY = d3.max(projected, point => point.rawY) ?? 0
+
+  const spanX = Math.max(maxX - minX, Number.EPSILON)
+  const spanY = Math.max(maxY - minY, Number.EPSILON)
+  const fitScale = Math.min((innerWidth * 0.35) / spanX, (innerHeight * 0.35) / spanY)
+
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (let i = 0; i < projected.length; i++) {
+    for (let j = i + 1; j < projected.length; j++) {
+      const distance = Math.hypot(
+        projected[i].rawX - projected[j].rawX,
+        projected[i].rawY - projected[j].rawY,
+      )
+      if (distance > 0 && distance < nearestDistance) nearestDistance = distance
+    }
+  }
+
+  const spacingScale = Number.isFinite(nearestDistance)
+    ? (HEX_SIZE * 1.9) / nearestDistance
+    : fitScale
+  const scale = Number.isFinite(fitScale) && fitScale > 0
+    ? Math.min(fitScale, spacingScale)
+    : spacingScale
+
+  const centerX = (minX + maxX) / 2
+  const centerY = (minY + maxY) / 2
+
+  return projected.map(({ cluster, rawX, rawY }) => ({
+    ...cluster,
+    x: (rawX - centerX) * scale + innerWidth / 2,
+    y: (rawY - centerY) * scale + innerHeight / 2,
+  }))
+}
+
 export default function HexMap({ onSelectSession }: HexMapProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [sessions, setSessions] = useState<AgentSession[]>([])
@@ -51,12 +142,13 @@ export default function HexMap({ onSelectSession }: HexMapProps) {
       ])
       setSessions(sessionsData)
       setConnections(conns)
+      if (sessionsData.length === 0) onSelectSession?.(null)
     } catch (e) {
       console.error('Failed to fetch data', e)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [onSelectSession])
 
   useEffect(() => {
     fetchData()
@@ -70,6 +162,8 @@ export default function HexMap({ onSelectSession }: HexMapProps) {
     const svg = d3.select(svgRef.current)
     const width = svgRef.current.clientWidth || 800
     const height = svgRef.current.clientHeight || 600
+    const innerWidth = Math.max(width - HEX_SIZE * 2, HEX_SIZE * 6)
+    const innerHeight = Math.max(height - HEX_SIZE * 2, HEX_SIZE * 6)
 
     const hexW = Math.sqrt(3) * HEX_SIZE
     const hexH = 1.5 * HEX_SIZE
@@ -81,7 +175,9 @@ export default function HexMap({ onSelectSession }: HexMapProps) {
     const defs = svg.append('defs')
     const radGrad = defs.append('radialGradient')
       .attr('id', 'bg-vignette')
-      .attr('cx', '50%').attr('cy', '50%').attr('r', '70%')
+      .attr('cx', '50%')
+      .attr('cy', '50%')
+      .attr('r', '70%')
     radGrad.append('stop').attr('offset', '0%').attr('stop-color', '#0d1525').attr('stop-opacity', 1)
     radGrad.append('stop').attr('offset', '100%').attr('stop-color', '#060a13').attr('stop-opacity', 1)
 
@@ -95,24 +191,6 @@ export default function HexMap({ onSelectSession }: HexMapProps) {
 
     const grid = generateHexGrid(cols, rows, HEX_SIZE)
 
-    const centerQ = Math.floor(cols / 2)
-    const centerR = Math.floor(rows / 2)
-
-    const sortedGrid = [...grid].sort((a, b) => {
-      const distA = Math.hypot(a.q - centerQ, a.r - centerR)
-      const distB = Math.hypot(b.q - centerQ, b.r - centerR)
-      return distA - distB
-    })
-
-    const sessionMap = new Map<string, AgentSession>()
-    sessions.forEach((session, i) => {
-      if (i < sortedGrid.length) {
-        const cell = sortedGrid[i]
-        sessionMap.set(`${cell.q},${cell.r}`, session)
-      }
-    })
-
-    // Empty hexes
     g.selectAll('.hex-empty')
       .data(grid)
       .enter()
@@ -124,29 +202,35 @@ export default function HexMap({ onSelectSession }: HexMapProps) {
       .attr('stroke', EMPTY_STROKE)
       .attr('stroke-width', 0.5)
 
-    // Session position lookup for connection lines
-    const sessionPositionMap = new Map<string, { x: number; y: number }>()
-    sessions.forEach((session, i) => {
-      if (i < sortedGrid.length) {
-        const cell = sortedGrid[i]
-        sessionPositionMap.set(session.session_id, { x: cell.x, y: cell.y })
-      }
+    const clusteredSessions = projectHexClusters(buildHexClusters(sessions), width, height)
+
+    const sessionPositionMap = new Map<string, { x: number; y: number; hex_id: string }>()
+    clusteredSessions.forEach(cluster => {
+      cluster.sessions.forEach(session => {
+        sessionPositionMap.set(session.session_id, {
+          x: cluster.x,
+          y: cluster.y,
+          hex_id: cluster.hex_id,
+        })
+      })
     })
 
-    // Connection lines
     if (connections.length > 0) {
-      const connectionLines = connections.filter(
-        c => sessionPositionMap.has(c.session_a_id) && sessionPositionMap.has(c.session_b_id)
-      )
+      const connectionLines = connections.filter(connection => {
+        const from = sessionPositionMap.get(connection.session_a_id)
+        const to = sessionPositionMap.get(connection.session_b_id)
+        if (!from || !to) return false
+        return from.hex_id !== to.hex_id
+      })
 
       g.selectAll('.connection-line')
         .data(connectionLines)
         .enter()
         .append('path')
         .attr('class', 'connection-line')
-        .attr('d', c => {
-          const from = sessionPositionMap.get(c.session_a_id)!
-          const to = sessionPositionMap.get(c.session_b_id)!
+        .attr('d', connection => {
+          const from = sessionPositionMap.get(connection.session_a_id)!
+          const to = sessionPositionMap.get(connection.session_b_id)!
           const mx = (from.x + to.x) / 2
           const my = (from.y + to.y) / 2
           const dx = to.x - from.x
@@ -159,82 +243,95 @@ export default function HexMap({ onSelectSession }: HexMapProps) {
         })
         .attr('fill', 'none')
         .attr('stroke', 'rgba(59, 130, 246, 0.4)')
-        .attr('stroke-width', c => Math.max(0.5, Math.min(3, c.strength * 0.5)))
-        .attr('stroke-opacity', c => c.strength < 1 ? 0.2 : c.strength > 5 ? 0.6 : 0.15 + c.strength * 0.09)
+        .attr('stroke-width', connection => Math.max(0.5, Math.min(3, connection.strength * 0.5)))
+        .attr('stroke-opacity', connection =>
+          connection.strength < 1 ? 0.2 : connection.strength > 5 ? 0.6 : 0.15 + connection.strength * 0.09,
+        )
         .attr('stroke-linecap', 'round')
     }
-
-    // Occupied hexes
-    const occupiedData = grid
-      .map(cell => ({ ...cell, session: sessionMap.get(`${cell.q},${cell.r}`) }))
-      .filter((d): d is typeof d & { session: AgentSession } => d.session !== undefined)
 
     const glowFilter = defs.append('filter').attr('id', 'hex-glow')
     glowFilter.append('feGaussianBlur').attr('stdDeviation', '3').attr('result', 'blur')
     glowFilter.append('feComposite').attr('in', 'SourceGraphic').attr('in2', 'blur').attr('operator', 'over')
 
     const hexGroups = g.selectAll('.hex-session')
-      .data(occupiedData)
+      .data(clusteredSessions)
       .enter()
       .append('g')
       .attr('class', 'hex-session')
-      .attr('transform', d => `translate(${d.x}, ${d.y})`)
+      .attr('transform', cluster => `translate(${cluster.x}, ${cluster.y})`)
       .style('cursor', 'pointer')
-      .on('click', (_event, d) => {
-        onSelectSession?.(d.session)
+      .on('click', (event, cluster) => {
+        onSelectSession?.(cluster.primary)
         g.selectAll('.hex-session .hex-fill').attr('stroke', OCCUPIED_STROKE).attr('stroke-width', 1)
-        const target = _event.currentTarget as SVGGElement
+        const target = event.currentTarget as SVGGElement
         d3.select(target).select('.hex-fill')
           .attr('stroke', '#e2e8f0')
           .attr('stroke-width', 2)
       })
-      .on('mouseenter', (_event, d) => {
-        const target = _event.currentTarget as SVGGElement
-        const baseColour = d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR
+      .on('mouseenter', (event, cluster) => {
+        const target = event.currentTarget as SVGGElement
+        const baseColour = cluster.primary.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR
         const colour = d3.color(baseColour)
         d3.select(target).select('.hex-fill')
           .attr('fill', colour ? colour.brighter(0.5).toString() : baseColour)
       })
-      .on('mouseleave', (_event, d) => {
-        const target = _event.currentTarget as SVGGElement
+      .on('mouseleave', (event, cluster) => {
+        const target = event.currentTarget as SVGGElement
         d3.select(target).select('.hex-fill')
-          .attr('fill', d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
-          .attr('fill-opacity', d.session.status === 'active' ? 0.7 : 0.3)
+          .attr('fill', cluster.primary.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
+          .attr('fill-opacity', cluster.primary.status === 'active' ? 0.7 : 0.3)
       })
 
-    // Glow layer
     hexGroups.append('path')
       .attr('d', hexPath(HEX_SIZE + 4))
-      .attr('fill', d => d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
-      .attr('fill-opacity', d => d.session.status === 'active' ? 0.12 : 0.04)
+      .attr('fill', cluster => cluster.primary.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
+      .attr('fill-opacity', cluster => cluster.primary.status === 'active' ? 0.12 : 0.04)
       .attr('stroke', 'none')
       .attr('filter', 'url(#hex-glow)')
 
-    // Hex fill
     hexGroups.append('path')
       .attr('class', 'hex-fill')
       .attr('d', hexPath(HEX_SIZE - 1))
-      .attr('fill', d => d.session.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
-      .attr('fill-opacity', d => d.session.status === 'active' ? 0.7 : 0.3)
+      .attr('fill', cluster => cluster.primary.status === 'active' ? ACTIVE_COLOUR : DISCONNECTED_COLOUR)
+      .attr('fill-opacity', cluster => cluster.primary.status === 'active' ? 0.7 : 0.3)
       .attr('stroke', OCCUPIED_STROKE)
       .attr('stroke-width', 1)
       .style('transition', 'fill 0.15s ease, fill-opacity 0.15s ease')
 
-    // Session name label
     hexGroups.append('text')
       .attr('text-anchor', 'middle')
       .attr('dominant-baseline', 'central')
       .attr('y', 1)
-      .attr('fill', d => d.session.status === 'active' ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.4)')
+      .attr('fill', cluster => cluster.primary.status === 'active' ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.4)')
       .attr('font-size', '10px')
       .attr('font-weight', '600')
       .attr('font-family', "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace")
       .attr('letter-spacing', '0.5px')
-      .text(d => d.session.name.slice(0, 3).toUpperCase())
+      .text(cluster => cluster.primary.name.slice(0, 3).toUpperCase())
 
-    // Pulse for active sessions
+    const stackedHexes = hexGroups.filter(cluster => cluster.sessions.length > 1)
+
+    stackedHexes.append('circle')
+      .attr('cx', HEX_SIZE * 0.45)
+      .attr('cy', -HEX_SIZE * 0.3)
+      .attr('r', 10)
+      .attr('fill', '#e2e8f0')
+      .attr('fill-opacity', 0.95)
+
+    stackedHexes.append('text')
+      .attr('x', HEX_SIZE * 0.45)
+      .attr('y', -HEX_SIZE * 0.3 + 0.5)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('fill', '#0f172a')
+      .attr('font-size', '10px')
+      .attr('font-weight', '700')
+      .attr('font-family', "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace")
+      .text(cluster => cluster.sessions.length)
+
     hexGroups
-      .filter(d => d.session.status === 'active')
+      .filter(cluster => cluster.primary.status === 'active')
       .append('path')
       .attr('d', hexPath(HEX_SIZE - 1))
       .attr('fill', 'none')
@@ -243,80 +340,46 @@ export default function HexMap({ onSelectSession }: HexMapProps) {
       .attr('opacity', 0.5)
       .style('animation', 'hexPulse 3s ease-in-out infinite')
 
-    // Zoom + pan
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.3, 4])
-      .on('zoom', (event) => {
+      .on('zoom', event => {
         g.attr('transform', event.transform)
       })
 
     svg.call(zoom)
-
-    if (sessions.length > 0 && sortedGrid.length > 0) {
-      const firstSession = sortedGrid[0]
-      const offsetX = width / 2 - firstSession.x - HEX_SIZE
-      const offsetY = height / 2 - firstSession.y - HEX_SIZE
-      svg.call(zoom.transform, d3.zoomIdentity.translate(offsetX, offsetY))
-    }
-
-  }, [sessions, connections, onSelectSession])
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full" style={{ background: '#060a13' }}>
-        <div className="text-center">
-          <div className="hex-loader mb-4" />
-          <p className="text-slate-500 text-xs font-mono tracking-wider">LOADING GRID</p>
-        </div>
-      </div>
-    )
-  }
+    svg.call(zoom.transform, d3.zoomIdentity.translate(HEX_SIZE, HEX_SIZE))
+  }, [connections, onSelectSession, sessions])
 
   return (
-    <div className="relative w-full h-full overflow-hidden" style={{ background: '#060a13' }}>
-      <style>{`
-        @keyframes hexPulse {
-          0%, 100% { opacity: 0.5; transform: scale(1); }
-          50% { opacity: 0; transform: scale(1.4); }
-        }
-        @keyframes hexSpin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-        .hex-loader {
-          width: 32px;
-          height: 32px;
-          border: 2px solid rgba(148, 163, 184, 0.1);
-          border-top-color: rgba(148, 163, 184, 0.4);
-          border-radius: 50%;
-          animation: hexSpin 1s linear infinite;
-          margin: 0 auto;
-        }
-      `}</style>
-
-      {/* Status legend */}
-      <div className="absolute bottom-3 right-3 z-10 flex items-center gap-3 text-xs font-mono">
-        <div className="flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full" style={{ background: ACTIVE_COLOUR, opacity: 0.7 }} />
-          <span className="text-slate-600">active</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full" style={{ background: DISCONNECTED_COLOUR, opacity: 0.5 }} />
-          <span className="text-slate-600">disconnected</span>
-        </div>
-      </div>
-
-      {/* Empty state */}
-      {sessions.length === 0 && (
+    <div className="relative w-full h-full overflow-hidden">
+      {loading && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-          <div className="text-center">
-            <p className="text-slate-600 text-sm font-mono">No active sessions</p>
-            <p className="text-slate-700 text-xs font-mono mt-1">Connect an agent to get started</p>
-          </div>
+          <p className="text-slate-500 text-xs font-mono tracking-wider">LOADING MAP</p>
         </div>
       )}
 
-      <svg ref={svgRef} className="w-full h-full" />
+      <svg ref={svgRef} className="w-full h-full" style={{ minHeight: 500 }} />
+
+      <div className="absolute bottom-3 left-3 flex items-center gap-4 text-[10px] font-mono uppercase tracking-wider">
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full" style={{ background: ACTIVE_COLOUR }} />
+          <span className="text-slate-400">live hex</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full" style={{ background: '#e2e8f0' }} />
+          <span className="text-slate-500">shared repo hex</span>
+        </div>
+      </div>
+
+      {sessions.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="text-center">
+            <div className="text-slate-700 text-4xl mb-3">⬡</div>
+            <p className="text-slate-600 text-sm font-mono">No active sessions</p>
+            <p className="text-slate-700 text-xs font-mono mt-1">Connect a repo to claim a home hex.</p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

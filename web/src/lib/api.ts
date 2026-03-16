@@ -14,6 +14,9 @@ export interface AgentSession {
   last_heartbeat: number
   connected_at: number
   disconnected_at: number | null
+  hex_center_lat: number
+  hex_center_lng: number
+  stack_count?: number
 }
 
 export interface KnowledgeEntry {

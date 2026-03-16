@@ -48,6 +48,13 @@ export default function SessionPanel({ session, onClose }: SessionPanelProps) {
         <p className="text-xs text-slate-500 leading-relaxed mb-3">{session.description}</p>
       )}
 
+      {session.stack_count && session.stack_count > 1 && (
+        <div className="border border-white/[0.04] p-2 mb-3">
+          <div className="text-[10px] font-mono text-slate-600 uppercase tracking-wider mb-0.5">shared hex</div>
+          <div className="text-xs font-mono text-slate-300">{session.stack_count} live sessions</div>
+        </div>
+      )}
+
       {session.repo_url && (
         <div className="border border-white/[0.04] p-2 mb-3">
           <div className="text-[10px] font-mono text-slate-600 uppercase tracking-wider mb-0.5">repo</div>
