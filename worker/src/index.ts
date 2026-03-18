@@ -51,6 +51,7 @@ import {
   heartbeat,
   heartbeatSchema,
   listSessions,
+  listSessionsForDashboard,
 } from './tools/session'
 import {
   askAgent,
@@ -467,11 +468,11 @@ export default {
       }
     }
 
-    // GET /api/sessions — list agent sessions
+    // GET /api/sessions — list agent sessions (dashboard: includes disconnected for claimed repos)
     if (url.pathname === '/api/sessions' && request.method === 'GET') {
       try {
         const user = await requireSessionUser(request, env)
-        const result = await listSessions(env, { account_id: user.user_id })
+        const result = await listSessionsForDashboard(env, { account_id: user.user_id })
         return jsonResponse(result)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 400

@@ -48,6 +48,8 @@ function hexPath(size: number): string {
 }
 
 function rankSessions(a: AgentSession, b: AgentSession): number {
+  // Active sessions always rank above disconnected
+  if (a.status !== b.status) return a.status === 'active' ? -1 : 1
   if (b.last_heartbeat !== a.last_heartbeat) return b.last_heartbeat - a.last_heartbeat
   return b.connected_at - a.connected_at
 }

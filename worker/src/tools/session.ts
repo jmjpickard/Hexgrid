@@ -13,6 +13,7 @@ import {
   getRepoHexClaim,
   insertAgentSession,
   listActiveSessions,
+  listSessionsForMap,
   upsertRepoHexClaim,
   updateHeartbeat,
 } from '../db/queries'
@@ -148,6 +149,38 @@ export async function listSessions(
   await expireStaleSessions(env.DB, now - STALE_THRESHOLD_SECONDS)
 
   const sessions = await listActiveSessions(env.DB, account.account_id)
+
+  return {
+    sessions: sessions.map(s => {
+      const [hexCenterLat, hexCenterLng] = getHexCentre(s.hex_id)
+      return {
+        session_id: s.session_id,
+        account_id: s.account_id,
+        name: s.name,
+        repo_url: s.repo_url,
+        description: s.description,
+        capabilities: s.capabilities,
+        hex_id: s.hex_id,
+        status: s.status,
+        last_heartbeat: s.last_heartbeat,
+        connected_at: s.connected_at,
+        disconnected_at: s.disconnected_at,
+        hex_center_lat: hexCenterLat,
+        hex_center_lng: hexCenterLng,
+      }
+    }),
+  }
+}
+
+/** Dashboard variant: includes disconnected sessions for claimed repos so hexes persist on the map */
+export async function listSessionsForDashboard(
+  env: Env,
+  account: AccountAuthContext,
+): Promise<ListSessionsOutput> {
+  const now = nowUnix()
+  await expireStaleSessions(env.DB, now - STALE_THRESHOLD_SECONDS)
+
+  const sessions = await listSessionsForMap(env.DB, account.account_id)
 
   return {
     sessions: sessions.map(s => {

@@ -14,6 +14,28 @@ import type {
   UserRow,
 } from '../lib/types'
 
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+function escapeLike(s: string): string {
+  return s.replace(/[%_\\]/g, c => `\\${c}`)
+}
+
+/** Extract up to `max` meaningful keywords (≥3 chars) from a question for LIKE matching */
+function extractKeywords(text: string, max = 6): string[] {
+  const stopWords = new Set([
+    'the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were',
+    'been', 'have', 'has', 'had', 'not', 'but', 'what', 'when', 'where', 'how',
+    'which', 'who', 'whom', 'can', 'could', 'would', 'should', 'does', 'show',
+    'about', 'into', 'than', 'then', 'them', 'they', 'there', 'here',
+  ])
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !stopWords.has(w))
+    .slice(0, max)
+}
+
 // ─── USERS + AUTH ─────────────────────────────────────────────────────────────
 
 export async function getUserById(db: D1Database, userId: string): Promise<UserRow | null> {
@@ -399,6 +421,36 @@ export async function listAllSessions(db: D1Database, accountId: string): Promis
   return result.results
 }
 
+/** Active sessions + latest disconnected session per claimed repo with no active sessions */
+export async function listSessionsForMap(db: D1Database, accountId: string): Promise<AgentSessionRow[]> {
+  const result = await db
+    .prepare(`
+      SELECT * FROM agent_sessions
+      WHERE account_id = ? AND status = 'active'
+
+      UNION ALL
+
+      SELECT s.* FROM agent_sessions s
+      INNER JOIN repo_hex_claims c
+        ON s.account_id = c.account_id AND s.hex_id = c.hex_id
+      WHERE c.account_id = ? AND c.released_at IS NULL
+        AND s.status = 'disconnected'
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_sessions a
+          WHERE a.account_id = ? AND a.hex_id = c.hex_id AND a.status = 'active'
+        )
+        AND s.connected_at = (
+          SELECT MAX(s2.connected_at) FROM agent_sessions s2
+          WHERE s2.account_id = ? AND s2.hex_id = c.hex_id AND s2.status = 'disconnected'
+        )
+
+      ORDER BY connected_at DESC
+    `)
+    .bind(accountId, accountId, accountId, accountId)
+    .all<AgentSessionRow>()
+  return result.results
+}
+
 export async function updateHeartbeat(db: D1Database, sessionId: string, now: number): Promise<void> {
   await db
     .prepare("UPDATE agent_sessions SET last_heartbeat = ? WHERE session_id = ? AND status = 'active'")
@@ -522,9 +574,15 @@ export async function searchKnowledge(
   const binds: (string | number)[] = [accountId]
 
   if (query) {
-    sql += ' AND (k.topic LIKE ? OR k.content LIKE ?)'
-    const like = `%${query}%`
-    binds.push(like, like)
+    const keywords = extractKeywords(query)
+    if (keywords.length > 0) {
+      const clauses = keywords.map(() => `(k.topic LIKE ? ESCAPE '\\' OR k.content LIKE ? ESCAPE '\\')`)
+      sql += ` AND (${clauses.join(' OR ')})`
+      for (const kw of keywords) {
+        const like = `%${escapeLike(kw)}%`
+        binds.push(like, like)
+      }
+    }
   }
 
   if (tags && tags.length > 0) {
@@ -617,25 +675,39 @@ export async function searchKnowledgeByCapability(
   question: string,
   limit = 3,
 ): Promise<KnowledgeRow[]> {
-  const like = `%${question}%`
-  const result = await db
-    .prepare(`
-      SELECT * FROM knowledge
-      WHERE account_id = ?
-        AND capability = ?
-        AND status IN ('canonical', 'candidate')
-        AND (topic LIKE ? OR content LIKE ?)
+  const keywords = extractKeywords(question)
+  const baseSql = `
+    SELECT * FROM knowledge
+    WHERE account_id = ?
+      AND capability = ?
+      AND status IN ('canonical', 'candidate')`
+  const binds: (string | number)[] = [accountId, capability]
+
+  if (keywords.length > 0) {
+    const clauses = keywords.map(() => `(topic LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')`)
+    const keywordSql = `${baseSql} AND (${clauses.join(' OR ')})`
+    for (const kw of keywords) {
+      const like = `%${escapeLike(kw)}%`
+      binds.push(like, like)
+    }
+    const orderSql = `
       ORDER BY
-        CASE status
-          WHEN 'canonical' THEN 0
-          WHEN 'candidate' THEN 1
-          ELSE 2
-        END ASC,
-        confidence DESC,
-        updated_at DESC
-      LIMIT ?
-    `)
-    .bind(accountId, capability, like, like, limit)
+        CASE status WHEN 'canonical' THEN 0 WHEN 'candidate' THEN 1 ELSE 2 END ASC,
+        confidence DESC, updated_at DESC
+      LIMIT ?`
+    binds.push(limit)
+    const result = await db.prepare(keywordSql + orderSql).bind(...binds).all<KnowledgeRow>()
+    return result.results
+  }
+
+  // No usable keywords — just match on capability
+  const result = await db
+    .prepare(`${baseSql}
+      ORDER BY
+        CASE status WHEN 'canonical' THEN 0 WHEN 'candidate' THEN 1 ELSE 2 END ASC,
+        confidence DESC, updated_at DESC
+      LIMIT ?`)
+    .bind(accountId, capability, limit)
     .all<KnowledgeRow>()
   return result.results
 }
