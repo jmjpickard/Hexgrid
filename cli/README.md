@@ -12,8 +12,13 @@ npm install -g @jackpickard/hexgrid-cli
 
 ```bash
 hexgrid workspace init --name platform
+cd ~/src/api-service
+hexgrid repo add api
+
+# you can still be explicit when scripting
 hexgrid repo add api --path ~/src/api-service --runtime codex --listen manual
 hexgrid repo list
+hexgrid
 hexgrid repo run api --runtime codex
 hexgrid repo listen api
 
@@ -40,8 +45,21 @@ hexgrid logout
 hexgrid update
 ```
 
-`hexgrid repo add <repo_id>` can also be run interactively. If you omit flags in a TTY,
-the CLI will prompt for the local path, remote, description, runtime, and listen mode.
+`hexgrid workspace init` marks that workspace as the current workspace in local config.
+After that, you can run `hexgrid repo add <repo_id>` from inside a cloned repo and the
+CLI will prompt for the remaining fields, with the current repo path detected by default.
+
+`hexgrid` with no arguments now opens the active workspace TUI in an interactive terminal.
+If stdout is not a TTY, it falls back to the JSON workspace summary.
+
+## TUI controls
+
+- `j` / `k`: move between repos
+- `r`: open runtime picker for the selected repo
+- `c`: run selected repo with Codex after pressing `r`
+- `l`: run selected repo with Claude after pressing `r`
+- `u`: refresh workspace state
+- `q`: quit
 
 ## Login flow
 
@@ -67,11 +85,12 @@ the CLI will prompt for the local path, remote, description, runtime, and listen
 ## Recommended UX
 
 1. `hexgrid workspace init` once at your chosen workspace root.
-2. Register repos with `hexgrid repo add`.
+2. `cd` into each cloned repo and register it with `hexgrid repo add <repo_id>`.
 3. `hexgrid login` once per machine.
 4. In each repo, run `hexgrid onboard` once to publish a first-pass repo dossier.
-5. Start a live session with `hexgrid repo run <repo>` or from inside a repo with `hexgrid run codex|claude`.
-6. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
+5. Use `hexgrid` to inspect the current workspace from anywhere.
+6. Start a live session with `hexgrid repo run <repo>` or from inside a repo with `hexgrid run codex|claude`.
+7. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
 
 ## Update CLI
 

@@ -20,6 +20,7 @@ import {
   upsertWorkspaceRepo,
   upsertWorkspaceRepoBinding,
 } from '../src/workspace.mjs'
+import { runWorkspaceTui } from '../src/tui.mjs'
 
 const DEFAULT_API_URL = process.env.HEXGRID_API_URL ?? 'https://api.hexgrid.app'
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'hexgrid', 'config.json')
@@ -54,6 +55,7 @@ function usage() {
 
 Usage:
   hexgrid
+  hexgrid tui
   hexgrid workspace [status]
   hexgrid workspace init [--name NAME]
   hexgrid repo add <repo_id> [--path PATH] [--remote URL] [--description TEXT] [--runtime RUNTIME] [--listen MODE]
@@ -1237,6 +1239,24 @@ async function buildWorkspaceRepoSummaries(manifest, localState, config) {
   }))
 }
 
+async function loadWorkspaceSnapshot() {
+  const config = await loadConfig()
+  const workspace = await resolveActiveWorkspace(config)
+  const localState = getWorkspaceState(config, workspace.workspaceRoot)
+  const repos = await buildWorkspaceRepoSummaries(workspace.manifest, localState, config)
+
+  return {
+    workspace_root: workspace.workspaceRoot,
+    workspace_name: workspace.manifest.name,
+    repos,
+    counts: {
+      active: repos.filter(repo => repo.status === 'active').length,
+      blocked: repos.filter(repo => repo.status === 'blocked').length,
+    },
+    refreshed_at: new Date(),
+  }
+}
+
 async function resolveActiveWorkspace(config, { startDir = process.cwd(), required = true } = {}) {
   const localWorkspace = await loadWorkspaceManifest(startDir)
   if (localWorkspace) return localWorkspace
@@ -1300,6 +1320,15 @@ async function commandWorkspace(args) {
   }
 
   throw new Error(`Unsupported workspace command "${subcommand}". Use \`hexgrid workspace init\` or \`hexgrid workspace\`.`)
+}
+
+async function commandTui() {
+  await runWorkspaceTui({
+    loadSnapshot: loadWorkspaceSnapshot,
+    runRepo: async (repoId, runtime) => {
+      await commandRepo(['run', repoId, '--runtime', runtime])
+    },
+  })
 }
 
 async function commandRepo(args) {
@@ -2483,7 +2512,11 @@ async function main() {
     const config = await loadConfig()
     const workspace = await resolveActiveWorkspace(config, { required: false })
     if (workspace) {
-      await commandWorkspace([])
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        await commandTui()
+      } else {
+        await commandWorkspace([])
+      }
       return
     }
     usage()
@@ -2496,6 +2529,10 @@ async function main() {
 
   if (command === 'workspace') {
     await commandWorkspace(args)
+    return
+  }
+  if (command === 'tui') {
+    await commandTui()
     return
   }
   if (command === 'repo') {
