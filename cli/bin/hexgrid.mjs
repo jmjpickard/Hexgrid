@@ -5,6 +5,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import process from 'node:process'
+import {
+  getWorkspaceRepoBinding,
+  getWorkspaceState,
+  initWorkspaceManifest,
+  loadWorkspaceManifest,
+  normaliseListenMode,
+  saveWorkspaceManifest,
+  upsertWorkspaceRepo,
+  upsertWorkspaceRepoBinding,
+} from '../src/workspace.mjs'
 
 const DEFAULT_API_URL = process.env.HEXGRID_API_URL ?? 'https://api.hexgrid.app'
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'hexgrid', 'config.json')
@@ -38,6 +48,12 @@ function usage() {
   console.log(`HexGrid CLI
 
 Usage:
+  hexgrid workspace [status]
+  hexgrid workspace init [--name NAME]
+  hexgrid repo add <repo_id> [--path PATH] [--remote URL] [--description TEXT] [--runtime RUNTIME] [--listen MODE]
+  hexgrid repo list
+  hexgrid repo run <repo_id> [--runtime RUNTIME] [--name NAME] [--description TEXT] [--heartbeat-seconds N] [-- ...agent args]
+  hexgrid repo listen <repo_id> [--runtime claude] [--capability CAP] [--name NAME] [--poll-seconds N]
   hexgrid login [--api-url URL] [--no-open] [--client-name NAME]
   hexgrid setup [all|codex|claude] [--mcp]
   hexgrid doctor [all|codex|claude] [--fix]
@@ -1010,6 +1026,278 @@ async function inspectRuntimeSetup(runtime, repoRoot, apiUrl) {
   return { ok: false, reason: `unsupported runtime ${runtime}` }
 }
 
+function requireLeadingPositional(args, label) {
+  const value = args[0]
+  if (!value || value.startsWith('-')) {
+    throw new Error(`Missing ${label}.`)
+  }
+  return value
+}
+
+function validateRepoId(repoId) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(repoId)) {
+    throw new Error(`Invalid repo id "${repoId}". Use letters, numbers, ".", "_" or "-".`)
+  }
+  return repoId
+}
+
+function stripFlagWithValue(args, name) {
+  const next = []
+
+  for (let idx = 0; idx < args.length; idx += 1) {
+    const arg = args[idx]
+    if (arg === '--') {
+      next.push(...args.slice(idx))
+      break
+    }
+    if (arg === name) {
+      idx += 1
+      continue
+    }
+    next.push(arg)
+  }
+
+  return next
+}
+
+function resolveRepoRootFromPath(repoPath) {
+  const absolutePath = path.resolve(repoPath)
+  return runGit(['-C', absolutePath, 'rev-parse', '--show-toplevel']) ?? absolutePath
+}
+
+function resolveRepoRemote(repoRoot) {
+  return runGit(['-C', repoRoot, 'remote', 'get-url', 'origin']) ?? `local://${repoRoot}`
+}
+
+async function withWorkingDirectory(nextCwd, callback) {
+  const previousCwd = process.cwd()
+  process.chdir(nextCwd)
+
+  try {
+    return await callback()
+  } finally {
+    process.chdir(previousCwd)
+  }
+}
+
+async function buildWorkspaceRepoSummaries(manifest, localState, config) {
+  const entries = Object.entries(manifest.repos ?? {}).sort(([left], [right]) => left.localeCompare(right))
+
+  return Promise.all(entries.map(async ([repoId, repo]) => {
+    const binding = localState.repos?.[repoId]
+    const repoPath = typeof binding?.path === 'string' ? binding.path : null
+    const pathExists = repoPath ? await fileExists(repoPath) : false
+    const session = repoPath ? config.sessions?.[sessionKey(repoPath)] ?? null : null
+
+    let status = 'unknown'
+    if (session) status = 'active'
+    else if (repoPath && pathExists) status = 'idle'
+    else if (repoPath && !pathExists) status = 'blocked'
+
+    return {
+      repo_id: repoId,
+      remote: repo.remote ?? null,
+      description: repo.description ?? null,
+      default_runtime: repo.defaultRuntime ?? null,
+      listen: repo.listen ?? 'manual',
+      path: repoPath,
+      path_exists: pathExists,
+      status,
+      local_session: session ? {
+        session_id: session.session_id,
+        runtime: session.runtime,
+        name: session.name,
+        connected_at: session.connected_at,
+      } : null,
+    }
+  }))
+}
+
+async function commandWorkspace(args) {
+  const subcommand = args[0] && !args[0].startsWith('-') ? args[0] : 'status'
+  const subArgs = subcommand === 'status' && (args[0]?.startsWith('-') ?? false) ? args : args.slice(1)
+
+  if (subcommand === 'init') {
+    const name = parseFlag(subArgs, '--name', null)
+    const created = await initWorkspaceManifest(process.cwd(), name)
+    console.log(JSON.stringify({
+      ok: true,
+      workspace_root: created.workspaceRoot,
+      manifest_path: created.manifestPath,
+      workspace: created.manifest.name,
+      repo_count: Object.keys(created.manifest.repos).length,
+    }, null, 2))
+    return
+  }
+
+  if (subcommand === 'status') {
+    const workspace = await loadWorkspaceManifest(process.cwd())
+    if (!workspace) {
+      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
+    }
+
+    const config = await loadConfig()
+    const localState = getWorkspaceState(config, workspace.workspaceRoot)
+    const repos = await buildWorkspaceRepoSummaries(workspace.manifest, localState, config)
+
+    console.log(JSON.stringify({
+      ok: true,
+      workspace_root: workspace.workspaceRoot,
+      manifest_path: workspace.manifestPath,
+      workspace: workspace.manifest.name,
+      repo_count: repos.length,
+      repos,
+    }, null, 2))
+    return
+  }
+
+  throw new Error(`Unsupported workspace command "${subcommand}". Use \`hexgrid workspace init\` or \`hexgrid workspace\`.`)
+}
+
+async function commandRepo(args) {
+  const subcommand = requireLeadingPositional(args, 'repo command')
+  const subArgs = args.slice(1)
+
+  if (subcommand === 'add') {
+    const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
+    const repoArgs = subArgs.slice(1)
+    const workspace = await loadWorkspaceManifest(process.cwd())
+    if (!workspace) {
+      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
+    }
+
+    const repoPathInput = parseFlag(repoArgs, '--path', process.cwd())
+    const resolvedPath = path.resolve(repoPathInput)
+    if (!(await fileExists(resolvedPath))) {
+      throw new Error(`Repo path does not exist: ${resolvedPath}`)
+    }
+
+    const repoRoot = resolveRepoRootFromPath(resolvedPath)
+    const existing = workspace.manifest.repos?.[repoId] ?? {}
+    const defaultRuntime = parseRuntime(
+      parseFlag(repoArgs, '--runtime', existing.defaultRuntime ?? 'codex'),
+      { allowAll: false, fallback: existing.defaultRuntime ?? 'codex' },
+    )
+    const listen = normaliseListenMode(parseFlag(repoArgs, '--listen', existing.listen ?? 'manual'))
+    const description = parseFlag(repoArgs, '--description', existing.description ?? null)
+    const remote = parseFlag(repoArgs, '--remote', existing.remote ?? resolveRepoRemote(repoRoot))
+
+    const manifest = upsertWorkspaceRepo(workspace.manifest, repoId, {
+      remote,
+      description,
+      defaultRuntime,
+      listen,
+    })
+    await saveWorkspaceManifest(workspace.workspaceRoot, manifest)
+
+    const config = await loadConfig()
+    const nextConfig = upsertWorkspaceRepoBinding(
+      config,
+      workspace.workspaceRoot,
+      manifest.name,
+      repoId,
+      repoRoot,
+    )
+    await saveConfig(nextConfig)
+
+    console.log(JSON.stringify({
+      ok: true,
+      workspace_root: workspace.workspaceRoot,
+      workspace: manifest.name,
+      repo_id: repoId,
+      path: repoRoot,
+      remote,
+      description,
+      default_runtime: defaultRuntime,
+      listen,
+    }, null, 2))
+    return
+  }
+
+  if (subcommand === 'list') {
+    const workspace = await loadWorkspaceManifest(process.cwd())
+    if (!workspace) {
+      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
+    }
+
+    const config = await loadConfig()
+    const localState = getWorkspaceState(config, workspace.workspaceRoot)
+    const repos = await buildWorkspaceRepoSummaries(workspace.manifest, localState, config)
+
+    console.log(JSON.stringify({
+      ok: true,
+      workspace_root: workspace.workspaceRoot,
+      workspace: workspace.manifest.name,
+      repos,
+    }, null, 2))
+    return
+  }
+
+  if (subcommand === 'run') {
+    const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
+    const repoArgs = subArgs.slice(1)
+    const workspace = await loadWorkspaceManifest(process.cwd())
+    if (!workspace) {
+      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
+    }
+
+    const config = await loadConfig()
+    const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
+    const repoPath = typeof binding?.path === 'string' ? binding.path : null
+    if (!repoPath) {
+      throw new Error(`Repo "${repoId}" has no local path binding. Re-run \`hexgrid repo add ${repoId} --path ...\`.`)
+    }
+    if (!(await fileExists(repoPath))) {
+      throw new Error(`Repo path does not exist: ${repoPath}`)
+    }
+
+    const repo = workspace.manifest.repos?.[repoId] ?? {}
+    const { primary, passthrough } = splitPassthroughArgs(repoArgs)
+    const runtime = parseRuntime(parseFlag(primary, '--runtime', repo.defaultRuntime ?? 'codex'), {
+      allowAll: false,
+      fallback: repo.defaultRuntime ?? 'codex',
+    })
+    const forwardedPrimary = stripFlagWithValue(primary, '--runtime')
+    const forwardedArgs = [
+      runtime,
+      ...forwardedPrimary,
+      ...(passthrough.length > 0 ? ['--', ...passthrough] : []),
+    ]
+
+    await withWorkingDirectory(repoPath, () => commandRun(forwardedArgs))
+    return
+  }
+
+  if (subcommand === 'listen') {
+    const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
+    const repoArgs = subArgs.slice(1)
+    const workspace = await loadWorkspaceManifest(process.cwd())
+    if (!workspace) {
+      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
+    }
+
+    const config = await loadConfig()
+    const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
+    const repoPath = typeof binding?.path === 'string' ? binding.path : null
+    if (!repoPath) {
+      throw new Error(`Repo "${repoId}" has no local path binding. Re-run \`hexgrid repo add ${repoId} --path ...\`.`)
+    }
+    if (!(await fileExists(repoPath))) {
+      throw new Error(`Repo path does not exist: ${repoPath}`)
+    }
+
+    const runtime = parseFlag(repoArgs, '--runtime', 'claude')
+    if (runtime && runtime.toLowerCase() !== 'claude') {
+      throw new Error('Repo listeners currently support only `claude`.')
+    }
+
+    await withWorkingDirectory(repoPath, () => commandListen(stripFlagWithValue(repoArgs, '--runtime')))
+    return
+  }
+
+  throw new Error(`Unsupported repo command "${subcommand}". Use add, list, run, or listen.`)
+}
+
 async function commandLogin(args) {
   const config = await loadConfig()
   const apiUrl = resolveApiUrl(args, config)
@@ -1178,8 +1466,8 @@ async function commandSetup(args) {
   const token = resolveToken(config)
   if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
 
-  await assertApiHealthy(apiUrl)
   await assertLoggedIn(apiUrl, token)
+  await assertApiHealthy(apiUrl)
 
   const runtimes = parseRuntimes(primary, 'all')
   const useMcp = hasFlag(primary, '--mcp')
@@ -1319,8 +1607,8 @@ async function commandOnboard(args) {
   const config = await loadConfig()
   const apiUrl = resolveApiUrl(args, config)
   const token = resolveToken(config)
-  await assertApiHealthy(apiUrl)
   await assertLoggedIn(apiUrl, token)
+  await assertApiHealthy(apiUrl)
 
   const context = await detectRepoContext()
   const name = parseFlag(args, '--name', `${context.repoName}-onboard`)
@@ -1416,8 +1704,8 @@ async function commandRun(args) {
   const config = await loadConfig()
   const apiUrl = resolveApiUrl(primary, config)
   const token = resolveToken(config)
-  await assertApiHealthy(apiUrl)
   await assertLoggedIn(apiUrl, token)
+  await assertApiHealthy(apiUrl)
 
   const context = await detectRepoContext()
   await setupRuntimes({
@@ -1782,8 +2070,8 @@ async function commandListen(args) {
   const token = resolveToken(config)
   if (!token) throw new Error('Not logged in. Run `hexgrid login` first.')
 
-  await assertApiHealthy(apiUrl)
   await assertLoggedIn(apiUrl, token)
+  await assertApiHealthy(apiUrl)
 
   const context = await detectRepoContext()
   const capability = parseFlag(args, '--capability', `repo:${context.repoName}`)
@@ -2064,6 +2352,14 @@ async function main() {
     return
   }
 
+  if (command === 'workspace') {
+    await commandWorkspace(args)
+    return
+  }
+  if (command === 'repo') {
+    await commandRepo(args)
+    return
+  }
   if (command === 'login') {
     await commandLogin(args)
     return

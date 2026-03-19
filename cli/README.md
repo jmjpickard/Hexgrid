@@ -11,6 +11,13 @@ npm install -g @jackpickard/hexgrid-cli
 ## Commands
 
 ```bash
+hexgrid workspace init --name platform
+hexgrid repo add api --path ~/src/api-service --runtime codex --listen manual
+hexgrid repo list
+hexgrid repo run api --runtime codex
+hexgrid repo listen api
+
+# repo-local flows still work
 hexgrid login
 hexgrid setup
 hexgrid doctor --fix
@@ -56,10 +63,12 @@ hexgrid update
 
 ## Recommended UX
 
-1. `hexgrid login` once per machine.
-2. In each repo, run `hexgrid onboard` once to publish a first-pass repo dossier.
-3. Start a live session with `hexgrid run codex` or `hexgrid run claude`.
-4. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
+1. `hexgrid workspace init` once at your chosen workspace root.
+2. Register repos with `hexgrid repo add`.
+3. `hexgrid login` once per machine.
+4. In each repo, run `hexgrid onboard` once to publish a first-pass repo dossier.
+5. Start a live session with `hexgrid repo run <repo>` or from inside a repo with `hexgrid run codex|claude`.
+6. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
 
 ## Update CLI
 

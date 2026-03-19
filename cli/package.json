@@ -1,6 +1,6 @@
 {
   "name": "@jackpickard/hexgrid-cli",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "HexGrid command line client for login and repo session lifecycle",
   "type": "module",
   "engines": {
@@ -8,6 +8,7 @@
   },
   "files": [
     "bin/hexgrid.mjs",
+    "src",
     "README.md"
   ],
   "keywords": [
