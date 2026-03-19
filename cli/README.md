@@ -40,6 +40,9 @@ hexgrid logout
 hexgrid update
 ```
 
+`hexgrid repo add <repo_id>` can also be run interactively. If you omit flags in a TTY,
+the CLI will prompt for the local path, remote, description, runtime, and listen mode.
+
 ## Login flow
 
 `hexgrid login` uses a browser-based device flow:

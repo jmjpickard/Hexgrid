@@ -108,12 +108,21 @@ export async function loadWorkspaceManifest(startDir = process.cwd()) {
   const found = await findWorkspaceRoot(startDir)
   if (!found) return null
 
-  const raw = await readFile(found.manifestPath, 'utf8')
+  return loadWorkspaceManifestFromRoot(found.workspaceRoot)
+}
+
+export async function loadWorkspaceManifestFromRoot(workspaceRoot) {
+  const canonicalRoot = await canonicalPath(workspaceRoot)
+  const manifestPath = path.join(canonicalRoot, WORKSPACE_MANIFEST_FILE)
+  if (!(await fileExists(manifestPath))) return null
+
+  const raw = await readFile(manifestPath, 'utf8')
   const parsed = JSON.parse(raw)
-  const manifest = normaliseManifest(parsed, path.basename(found.workspaceRoot))
+  const manifest = normaliseManifest(parsed, path.basename(canonicalRoot))
 
   return {
-    ...found,
+    workspaceRoot: canonicalRoot,
+    manifestPath,
     manifest,
   }
 }
@@ -202,6 +211,31 @@ export function getWorkspaceRepoBinding(config, workspaceRoot, repoId) {
   const repo = state.repos[repoId]
   if (!isPlainObject(repo)) return null
   return repo
+}
+
+export function getCurrentWorkspaceRoot(config) {
+  if (typeof config?.current_workspace_root !== 'string') return null
+  const value = config.current_workspace_root.trim()
+  return value || null
+}
+
+export function listConfiguredWorkspaces(config) {
+  if (!isPlainObject(config?.workspaces)) return []
+
+  return Object.entries(config.workspaces)
+    .filter(([, workspace]) => isPlainObject(workspace))
+    .map(([workspaceRoot, workspace]) => ({
+      workspace_root: workspaceRoot,
+      name: typeof workspace.name === 'string' ? workspace.name : path.basename(workspaceRoot),
+    }))
+}
+
+export function setCurrentWorkspace(config, workspaceRoot, workspaceName = null) {
+  const next = ensureWorkspaceState(config, workspaceRoot, workspaceName)
+  return {
+    ...next,
+    current_workspace_root: workspaceRoot,
+  }
 }
 
 export function upsertWorkspaceRepo(manifest, repoId, repoData) {

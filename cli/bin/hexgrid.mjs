@@ -5,13 +5,18 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import process from 'node:process'
+import { createInterface } from 'node:readline/promises'
 import {
+  getCurrentWorkspaceRoot,
   getWorkspaceRepoBinding,
   getWorkspaceState,
   initWorkspaceManifest,
+  listConfiguredWorkspaces,
   loadWorkspaceManifest,
+  loadWorkspaceManifestFromRoot,
   normaliseListenMode,
   saveWorkspaceManifest,
+  setCurrentWorkspace,
   upsertWorkspaceRepo,
   upsertWorkspaceRepoBinding,
 } from '../src/workspace.mjs'
@@ -48,6 +53,7 @@ function usage() {
   console.log(`HexGrid CLI
 
 Usage:
+  hexgrid
   hexgrid workspace [status]
   hexgrid workspace init [--name NAME]
   hexgrid repo add <repo_id> [--path PATH] [--remote URL] [--description TEXT] [--runtime RUNTIME] [--listen MODE]
@@ -1069,6 +1075,124 @@ function resolveRepoRemote(repoRoot) {
   return runGit(['-C', repoRoot, 'remote', 'get-url', 'origin']) ?? `local://${repoRoot}`
 }
 
+function canPromptUser() {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY)
+}
+
+async function promptLine(rl, label, { defaultValue = null, optional = false, parse = null } = {}) {
+  while (true) {
+    const suffix = defaultValue && defaultValue.length > 0
+      ? ` [${defaultValue}]`
+      : optional
+        ? ' (optional)'
+        : ''
+    const answer = (await rl.question(`${label}${suffix}: `)).trim()
+    const value = answer || defaultValue || ''
+
+    if (!value) {
+      if (optional) return null
+      console.log(`${label} is required.`)
+      continue
+    }
+
+    if (!parse) return value
+
+    try {
+      return await parse(value)
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.log(detail)
+    }
+  }
+}
+
+async function resolveRepoAddInput({ workspace, repoId, repoArgs, existing, existingBinding }) {
+  const explicitPath = parseFlag(repoArgs, '--path', null)
+  const explicitDescription = parseFlag(repoArgs, '--description', null)
+  const explicitRuntime = parseFlag(repoArgs, '--runtime', null)
+  const explicitListen = parseFlag(repoArgs, '--listen', null)
+  const explicitRemote = parseFlag(repoArgs, '--remote', null)
+
+  const inferredRepoRoot = resolveRepoRootFromPath(process.cwd())
+  const suggestedPath = existingBinding?.path
+    ?? (inferredRepoRoot !== workspace.workspaceRoot ? inferredRepoRoot : null)
+
+  let repoPath
+  if (explicitPath) {
+    repoPath = path.resolve(explicitPath)
+    if (!(await fileExists(repoPath))) {
+      throw new Error(`Repo path does not exist: ${repoPath}`)
+    }
+  } else if (canPromptUser()) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    try {
+      console.log(`Adding repo "${repoId}" to workspace "${workspace.manifest.name}".`)
+      repoPath = await promptLine(rl, 'Local repo path', {
+        defaultValue: suggestedPath,
+        parse: async (value) => {
+          const resolved = path.resolve(value)
+          if (!(await fileExists(resolved))) {
+            throw new Error(`Repo path does not exist: ${resolved}`)
+          }
+          return resolved
+        },
+      })
+
+      const repoRoot = resolveRepoRootFromPath(repoPath)
+      const detectedRemote = resolveRepoRemote(repoRoot)
+
+      const remote = explicitRemote ?? await promptLine(rl, 'Remote URL', {
+        defaultValue: existing.remote ?? detectedRemote,
+      })
+      const description = explicitDescription ?? await promptLine(rl, 'Description', {
+        defaultValue: existing.description ?? null,
+        optional: true,
+      })
+      const defaultRuntime = explicitRuntime
+        ? parseRuntime(explicitRuntime, { allowAll: false })
+        : await promptLine(rl, 'Default runtime', {
+            defaultValue: existing.defaultRuntime ?? 'codex',
+            parse: value => parseRuntime(value, { allowAll: false }),
+          })
+      const listen = explicitListen
+        ? normaliseListenMode(explicitListen)
+        : await promptLine(rl, 'Listen mode', {
+            defaultValue: existing.listen ?? 'manual',
+            parse: value => normaliseListenMode(value),
+          })
+
+      return {
+        repoRoot,
+        remote,
+        description,
+        defaultRuntime,
+        listen,
+      }
+    } finally {
+      rl.close()
+    }
+  } else {
+    throw new Error('Missing repo path. Pass `--path PATH` or run `hexgrid repo add <repo_id>` interactively.')
+  }
+
+  const repoRoot = resolveRepoRootFromPath(repoPath)
+  const defaultRuntime = parseRuntime(
+    explicitRuntime ?? existing.defaultRuntime ?? 'codex',
+    { allowAll: false, fallback: existing.defaultRuntime ?? 'codex' },
+  )
+  const listen = normaliseListenMode(explicitListen ?? existing.listen ?? 'manual')
+  const description = explicitDescription ?? existing.description ?? null
+  const remote = explicitRemote ?? existing.remote ?? resolveRepoRemote(repoRoot)
+
+  return {
+    repoRoot,
+    remote,
+    description,
+    defaultRuntime,
+    listen,
+  }
+}
+
 async function withWorkingDirectory(nextCwd, callback) {
   const previousCwd = process.cwd()
   process.chdir(nextCwd)
@@ -1113,6 +1237,31 @@ async function buildWorkspaceRepoSummaries(manifest, localState, config) {
   }))
 }
 
+async function resolveActiveWorkspace(config, { startDir = process.cwd(), required = true } = {}) {
+  const localWorkspace = await loadWorkspaceManifest(startDir)
+  if (localWorkspace) return localWorkspace
+
+  const currentWorkspaceRoot = getCurrentWorkspaceRoot(config)
+  if (currentWorkspaceRoot) {
+    const currentWorkspace = await loadWorkspaceManifestFromRoot(currentWorkspaceRoot)
+    if (currentWorkspace) return currentWorkspace
+  }
+
+  const configuredWorkspaces = listConfiguredWorkspaces(config)
+  if (configuredWorkspaces.length === 1) {
+    const onlyWorkspace = await loadWorkspaceManifestFromRoot(configuredWorkspaces[0].workspace_root)
+    if (onlyWorkspace) return onlyWorkspace
+  }
+
+  if (!required) return null
+
+  if (configuredWorkspaces.length > 1) {
+    throw new Error('Multiple workspaces are configured, but no active workspace could be resolved from this directory.')
+  }
+
+  throw new Error('No workspace found. Run `hexgrid workspace init` in your workspace root first.')
+}
+
 async function commandWorkspace(args) {
   const subcommand = args[0] && !args[0].startsWith('-') ? args[0] : 'status'
   const subArgs = subcommand === 'status' && (args[0]?.startsWith('-') ?? false) ? args : args.slice(1)
@@ -1120,6 +1269,9 @@ async function commandWorkspace(args) {
   if (subcommand === 'init') {
     const name = parseFlag(subArgs, '--name', null)
     const created = await initWorkspaceManifest(process.cwd(), name)
+    const config = await loadConfig()
+    const nextConfig = setCurrentWorkspace(config, created.workspaceRoot, created.manifest.name)
+    await saveConfig(nextConfig)
     console.log(JSON.stringify({
       ok: true,
       workspace_root: created.workspaceRoot,
@@ -1131,12 +1283,8 @@ async function commandWorkspace(args) {
   }
 
   if (subcommand === 'status') {
-    const workspace = await loadWorkspaceManifest(process.cwd())
-    if (!workspace) {
-      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
-    }
-
     const config = await loadConfig()
+    const workspace = await resolveActiveWorkspace(config)
     const localState = getWorkspaceState(config, workspace.workspaceRoot)
     const repos = await buildWorkspaceRepoSummaries(workspace.manifest, localState, config)
 
@@ -1161,26 +1309,23 @@ async function commandRepo(args) {
   if (subcommand === 'add') {
     const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
     const repoArgs = subArgs.slice(1)
-    const workspace = await loadWorkspaceManifest(process.cwd())
-    if (!workspace) {
-      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
-    }
-
-    const repoPathInput = parseFlag(repoArgs, '--path', process.cwd())
-    const resolvedPath = path.resolve(repoPathInput)
-    if (!(await fileExists(resolvedPath))) {
-      throw new Error(`Repo path does not exist: ${resolvedPath}`)
-    }
-
-    const repoRoot = resolveRepoRootFromPath(resolvedPath)
+    const config = await loadConfig()
+    const workspace = await resolveActiveWorkspace(config)
     const existing = workspace.manifest.repos?.[repoId] ?? {}
-    const defaultRuntime = parseRuntime(
-      parseFlag(repoArgs, '--runtime', existing.defaultRuntime ?? 'codex'),
-      { allowAll: false, fallback: existing.defaultRuntime ?? 'codex' },
-    )
-    const listen = normaliseListenMode(parseFlag(repoArgs, '--listen', existing.listen ?? 'manual'))
-    const description = parseFlag(repoArgs, '--description', existing.description ?? null)
-    const remote = parseFlag(repoArgs, '--remote', existing.remote ?? resolveRepoRemote(repoRoot))
+    const existingBinding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
+    const {
+      repoRoot,
+      remote,
+      description,
+      defaultRuntime,
+      listen,
+    } = await resolveRepoAddInput({
+      workspace,
+      repoId,
+      repoArgs,
+      existing,
+      existingBinding,
+    })
 
     const manifest = upsertWorkspaceRepo(workspace.manifest, repoId, {
       remote,
@@ -1190,7 +1335,6 @@ async function commandRepo(args) {
     })
     await saveWorkspaceManifest(workspace.workspaceRoot, manifest)
 
-    const config = await loadConfig()
     const nextConfig = upsertWorkspaceRepoBinding(
       config,
       workspace.workspaceRoot,
@@ -1215,12 +1359,8 @@ async function commandRepo(args) {
   }
 
   if (subcommand === 'list') {
-    const workspace = await loadWorkspaceManifest(process.cwd())
-    if (!workspace) {
-      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
-    }
-
     const config = await loadConfig()
+    const workspace = await resolveActiveWorkspace(config)
     const localState = getWorkspaceState(config, workspace.workspaceRoot)
     const repos = await buildWorkspaceRepoSummaries(workspace.manifest, localState, config)
 
@@ -1236,12 +1376,8 @@ async function commandRepo(args) {
   if (subcommand === 'run') {
     const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
     const repoArgs = subArgs.slice(1)
-    const workspace = await loadWorkspaceManifest(process.cwd())
-    if (!workspace) {
-      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
-    }
-
     const config = await loadConfig()
+    const workspace = await resolveActiveWorkspace(config)
     const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
     const repoPath = typeof binding?.path === 'string' ? binding.path : null
     if (!repoPath) {
@@ -1271,12 +1407,8 @@ async function commandRepo(args) {
   if (subcommand === 'listen') {
     const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
     const repoArgs = subArgs.slice(1)
-    const workspace = await loadWorkspaceManifest(process.cwd())
-    if (!workspace) {
-      throw new Error(`No workspace found. Run \`hexgrid workspace init\` in your workspace root.`)
-    }
-
     const config = await loadConfig()
+    const workspace = await resolveActiveWorkspace(config)
     const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
     const repoPath = typeof binding?.path === 'string' ? binding.path : null
     if (!repoPath) {
@@ -2347,7 +2479,17 @@ async function commandUpdate() {
 async function main() {
   const [command, ...args] = process.argv.slice(2)
 
-  if (!command || command === '-h' || command === '--help' || command === 'help') {
+  if (!command) {
+    const config = await loadConfig()
+    const workspace = await resolveActiveWorkspace(config, { required: false })
+    if (workspace) {
+      await commandWorkspace([])
+      return
+    }
+    usage()
+    return
+  }
+  if (command === '-h' || command === '--help' || command === 'help') {
     usage()
     return
   }
