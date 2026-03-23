@@ -1206,6 +1206,473 @@ async function withWorkingDirectory(nextCwd, callback) {
   }
 }
 
+function stripRepoSuffix(input) {
+  return String(input ?? '').replace(/\.git$/i, '').replace(/\/+$/, '')
+}
+
+function normaliseRepoPath(pathname) {
+  return stripRepoSuffix(pathname.trim()).replace(/^\/+/, '')
+}
+
+function normaliseWorkspaceRepoUrl(repoUrl) {
+  const trimmed = String(repoUrl ?? '').trim()
+  if (!trimmed) return ''
+
+  if (trimmed.startsWith('local://')) {
+    const localPath = stripRepoSuffix(trimmed.slice('local://'.length)).replace(/\/{2,}/g, '/')
+    return `local://${localPath}`
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    const host = parsed.hostname.toLowerCase()
+    const pathname = normaliseRepoPath(parsed.pathname)
+    if (host && pathname) return `${host}/${pathname}`
+  } catch {
+    // Fall through to SCP-style git remotes and opaque local strings.
+  }
+
+  const scpMatch = trimmed.match(/^(?:[^@]+@)?([^:]+):(.+)$/)
+  if (scpMatch) {
+    const [, host, pathname] = scpMatch
+    return `${host.toLowerCase()}/${normaliseRepoPath(pathname)}`
+  }
+
+  return stripRepoSuffix(trimmed)
+}
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return []
+
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function parseCapabilities(value) {
+  return parseJsonArray(value)
+    .filter(item => typeof item === 'string')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function buildLocalSessionRuntimeIndex(config) {
+  const entries = Object.values(config?.sessions ?? {})
+  const index = new Map()
+
+  for (const session of entries) {
+    if (!session || typeof session !== 'object') continue
+    if (typeof session.session_id !== 'string' || !session.session_id) continue
+    if (typeof session.runtime !== 'string' || !session.runtime) continue
+    index.set(session.session_id, session.runtime)
+  }
+
+  return index
+}
+
+function inferSessionRuntime(session, localRuntimeIndex) {
+  const localRuntime = localRuntimeIndex.get(session.session_id)
+  if (localRuntime) return localRuntime
+
+  const capabilities = parseCapabilities(session.capabilities)
+  const runtimeCapability = capabilities.find(capability => capability.startsWith('runtime:'))
+  if (runtimeCapability) return runtimeCapability.slice('runtime:'.length)
+
+  if (/listener/i.test(session.name ?? '')) return 'listener'
+  return 'unknown'
+}
+
+function inferSessionMode(session, runtime) {
+  if (/listener/i.test(session.name ?? '')) return 'listener'
+  if (runtime === 'listener') return 'listener'
+  return 'interactive'
+}
+
+function buildWorkspaceRepoKeys(repo) {
+  const keys = new Set()
+  if (repo.remote) keys.add(normaliseWorkspaceRepoUrl(repo.remote))
+  if (repo.path) keys.add(normaliseWorkspaceRepoUrl(`local://${path.resolve(repo.path)}`))
+  return Array.from(keys).filter(Boolean)
+}
+
+function buildWorkspaceRepoIndex(repos) {
+  const repoIdByKey = new Map()
+  const repoIdByCapability = new Map()
+
+  for (const repo of repos) {
+    for (const repoKey of buildWorkspaceRepoKeys(repo)) {
+      if (!repoIdByKey.has(repoKey)) repoIdByKey.set(repoKey, repo.repo_id)
+    }
+
+    const capabilityKeys = [
+      repo.repo_id,
+      repo.path ? path.basename(repo.path) : null,
+    ]
+
+    for (const capabilityKey of capabilityKeys) {
+      const clean = String(capabilityKey ?? '').trim().toLowerCase()
+      if (clean && !repoIdByCapability.has(clean)) repoIdByCapability.set(clean, repo.repo_id)
+    }
+  }
+
+  return {
+    repoIdByKey,
+    repoIdByCapability,
+  }
+}
+
+function resolveWorkspaceRepoId({ repoUrl, capabilities }, repoIndex) {
+  const repoKey = normaliseWorkspaceRepoUrl(repoUrl ?? '')
+  if (repoKey && repoIndex.repoIdByKey.has(repoKey)) {
+    return repoIndex.repoIdByKey.get(repoKey)
+  }
+
+  for (const capability of capabilities) {
+    if (!capability.startsWith('repo:')) continue
+    const repoName = capability.slice('repo:'.length).trim().toLowerCase()
+    if (repoName && repoIndex.repoIdByCapability.has(repoName)) {
+      return repoIndex.repoIdByCapability.get(repoName)
+    }
+  }
+
+  return null
+}
+
+function previewText(input, max = 220) {
+  const clean = String(input ?? '').replace(/\s+/g, ' ').trim()
+  return truncateText(clean, max) ?? ''
+}
+
+async function loadWorkspaceSessions(apiUrl, token, config, repoIndex) {
+  const response = await requestJson(apiUrl, '/api/cli/sessions', {
+    method: 'GET',
+    token,
+  })
+
+  if (!response.response.ok) {
+    throw new Error(response.data.error ?? `List sessions failed (${response.response.status})`)
+  }
+
+  const localRuntimeIndex = buildLocalSessionRuntimeIndex(config)
+  const sessions = Array.isArray(response.data.sessions) ? response.data.sessions : []
+
+  return sessions
+    .map(session => {
+      const capabilities = parseCapabilities(session.capabilities)
+      const repoId = resolveWorkspaceRepoId({
+        repoUrl: session.repo_url,
+        capabilities,
+      }, repoIndex)
+
+      if (!repoId) return null
+
+      const runtime = inferSessionRuntime(session, localRuntimeIndex)
+      return {
+        session_id: session.session_id,
+        name: session.name,
+        repo_id: repoId,
+        repo_url: session.repo_url,
+        hex_id: session.hex_id,
+        description: session.description,
+        capabilities,
+        runtime,
+        mode: inferSessionMode(session, runtime),
+        status: session.status,
+        connected_at: session.connected_at,
+        disconnected_at: session.disconnected_at,
+        last_heartbeat: session.last_heartbeat,
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => Number(right.last_heartbeat ?? 0) - Number(left.last_heartbeat ?? 0))
+}
+
+async function loadWorkspaceInbox(apiUrl, token, sessions) {
+  const results = await Promise.all(sessions.map(async (session) => {
+    try {
+      const response = await requestJson(apiUrl, '/api/cli/inbox', {
+        method: 'POST',
+        token,
+        body: { session_id: session.session_id },
+      })
+
+      if (!response.response.ok) return []
+      const messages = Array.isArray(response.data.messages) ? response.data.messages : []
+
+      return messages.map(message => ({
+        message_id: message.message_id,
+        repo_id: session.repo_id,
+        to_session_id: session.session_id,
+        to_session_name: session.name,
+        to_runtime: session.runtime,
+        from_session_id: message.from_session_id,
+        from_session_name: message.from_session_name,
+        question: message.question,
+        created_at: message.created_at,
+      }))
+    } catch {
+      return []
+    }
+  }))
+
+  return results
+    .flat()
+    .sort((left, right) => Number(right.created_at ?? 0) - Number(left.created_at ?? 0))
+}
+
+async function searchWorkspaceKnowledge(apiUrl, token, body) {
+  const response = await requestJson(apiUrl, '/api/cli/knowledge/search', {
+    method: 'POST',
+    token,
+    body,
+  })
+
+  if (!response.response.ok) {
+    throw new Error(response.data.error ?? `Knowledge search failed (${response.response.status})`)
+  }
+
+  return Array.isArray(response.data.entries) ? response.data.entries : []
+}
+
+async function loadWorkspaceKnowledge(apiUrl, token, repoIndex) {
+  const [candidateNotes, qaNotes] = await Promise.all([
+    searchWorkspaceKnowledge(apiUrl, token, { status: 'candidate', limit: 100 }),
+    searchWorkspaceKnowledge(apiUrl, token, { kind: 'qa', limit: 100 }),
+  ])
+
+  return [...candidateNotes, ...qaNotes]
+    .map(note => {
+      const repoId = repoIndex.repoIdByKey.get(note.repo_key) ?? null
+      if (!repoId) return null
+
+      return {
+        id: note.id,
+        repo_id: repoId,
+        repo_key: note.repo_key,
+        kind: note.kind,
+        status: note.status,
+        topic: note.topic,
+        content: note.content,
+        preview: previewText(note.content),
+        tags: Array.isArray(note.tags) ? note.tags : [],
+        source_refs: Array.isArray(note.source_refs) ? note.source_refs : [],
+        confidence: note.confidence,
+        freshness: note.freshness,
+        session_name: note.session_name,
+        created_at: note.created_at,
+        updated_at: note.updated_at,
+        verified_at: note.verified_at,
+        expires_at: note.expires_at,
+        capability: note.capability ?? null,
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftUpdated = Number(left.updated_at ?? left.created_at ?? 0)
+      const rightUpdated = Number(right.updated_at ?? right.created_at ?? 0)
+      return rightUpdated - leftUpdated
+    })
+}
+
+async function loadWorkspaceRemoteSignals({ config, repos }) {
+  const apiUrl = resolveApiUrl([], config)
+  const token = resolveToken(config)
+
+  if (!token) {
+    return {
+      auth: {
+        status: 'logged_out',
+        api_url: apiUrl,
+        email: config.email ?? null,
+        error: 'Run `hexgrid login` to load sessions, inbox, and shared knowledge.',
+      },
+      sessions: [],
+      inbox: [],
+      knowledge: [],
+    }
+  }
+
+  const repoIndex = buildWorkspaceRepoIndex(repos)
+
+  try {
+    const sessions = await loadWorkspaceSessions(apiUrl, token, config, repoIndex)
+    const [inbox, knowledge] = await Promise.all([
+      loadWorkspaceInbox(apiUrl, token, sessions),
+      loadWorkspaceKnowledge(apiUrl, token, repoIndex),
+    ])
+
+    return {
+      auth: {
+        status: 'connected',
+        api_url: apiUrl,
+        email: config.email ?? null,
+        error: null,
+      },
+      sessions,
+      inbox,
+      knowledge,
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    return {
+      auth: {
+        status: 'error',
+        api_url: apiUrl,
+        email: config.email ?? null,
+        error: detail,
+      },
+      sessions: [],
+      inbox: [],
+      knowledge: [],
+    }
+  }
+}
+
+function mergeWorkspaceRepoSignals(repos, remoteSignals) {
+  const repoById = new Map(repos.map(repo => [repo.repo_id, {
+    ...repo,
+    repo_keys: buildWorkspaceRepoKeys(repo),
+    active_sessions: [],
+    pending_messages: [],
+    knowledge_notes: [],
+    candidate_notes: [],
+    counts: {
+      sessions: 0,
+      pending_messages: 0,
+      knowledge_notes: 0,
+      candidate_notes: 0,
+    },
+    attention: [],
+  }]))
+
+  for (const session of remoteSignals.sessions) {
+    const repo = repoById.get(session.repo_id)
+    if (!repo) continue
+    repo.active_sessions.push(session)
+  }
+
+  for (const message of remoteSignals.inbox) {
+    const repo = repoById.get(message.repo_id)
+    if (!repo) continue
+    repo.pending_messages.push(message)
+  }
+
+  for (const note of remoteSignals.knowledge) {
+    const repo = repoById.get(note.repo_id)
+    if (!repo) continue
+    repo.knowledge_notes.push(note)
+    if (note.status === 'candidate') repo.candidate_notes.push(note)
+  }
+
+  const authConnected = remoteSignals.auth.status === 'connected'
+
+  return repos.map(repo => {
+    const merged = repoById.get(repo.repo_id)
+    merged.active_sessions.sort((left, right) => Number(right.last_heartbeat ?? 0) - Number(left.last_heartbeat ?? 0))
+    merged.pending_messages.sort((left, right) => Number(right.created_at ?? 0) - Number(left.created_at ?? 0))
+    merged.knowledge_notes.sort((left, right) => Number(right.updated_at ?? 0) - Number(left.updated_at ?? 0))
+    merged.candidate_notes.sort((left, right) => Number(right.updated_at ?? 0) - Number(left.updated_at ?? 0))
+
+    merged.counts = {
+      sessions: merged.active_sessions.length,
+      pending_messages: merged.pending_messages.length,
+      knowledge_notes: merged.knowledge_notes.length,
+      candidate_notes: merged.candidate_notes.length,
+    }
+
+    if (!merged.path) {
+      merged.attention.push('Repo path is not bound on this machine.')
+    } else if (!merged.path_exists) {
+      merged.attention.push('Repo path is missing or no longer accessible.')
+    }
+
+    if (merged.pending_messages.length > 0) {
+      merged.attention.push(`${merged.pending_messages.length} pending message${merged.pending_messages.length === 1 ? '' : 's'} in the inbox.`)
+    }
+
+    if (merged.candidate_notes.length > 0) {
+      merged.attention.push(`${merged.candidate_notes.length} candidate knowledge note${merged.candidate_notes.length === 1 ? '' : 's'} waiting for review.`)
+    }
+
+    if (authConnected && merged.local_session && merged.active_sessions.length === 0) {
+      merged.attention.push('Local session cache exists, but the remote session is no longer active.')
+    }
+
+    if (authConnected) {
+      if (merged.active_sessions.length > 0) merged.status = 'active'
+      else if (merged.path && !merged.path_exists) merged.status = 'blocked'
+      else if (merged.path) merged.status = 'idle'
+      else merged.status = 'unknown'
+    }
+
+    return merged
+  })
+}
+
+function buildWorkspaceAttention(repos, auth) {
+  const items = []
+
+  if (auth.status === 'logged_out') {
+    items.push({
+      severity: 'warn',
+      repo_id: null,
+      label: 'Remote visibility is off',
+      detail: auth.error,
+    })
+  }
+
+  if (auth.status === 'error') {
+    items.push({
+      severity: 'error',
+      repo_id: null,
+      label: 'Remote sync failed',
+      detail: auth.error,
+    })
+  }
+
+  for (const repo of repos) {
+    if (!repo.path) {
+      items.push({
+        severity: 'error',
+        repo_id: repo.repo_id,
+        label: `${repo.repo_id} needs a local path`,
+        detail: 'Re-run `hexgrid repo add <repo_id> --path ...` to bind this repo locally.',
+      })
+    } else if (!repo.path_exists) {
+      items.push({
+        severity: 'error',
+        repo_id: repo.repo_id,
+        label: `${repo.repo_id} path is missing`,
+        detail: repo.path,
+      })
+    }
+
+    if (repo.pending_messages.length > 0) {
+      items.push({
+        severity: 'warn',
+        repo_id: repo.repo_id,
+        label: `${repo.repo_id} has pending agent requests`,
+        detail: `${repo.pending_messages.length} message${repo.pending_messages.length === 1 ? '' : 's'} waiting in the inbox.`,
+      })
+    }
+
+    if (repo.candidate_notes.length > 0) {
+      items.push({
+        severity: 'info',
+        repo_id: repo.repo_id,
+        label: `${repo.repo_id} learned something new`,
+        detail: `${repo.candidate_notes.length} candidate note${repo.candidate_notes.length === 1 ? '' : 's'} can be promoted into canonical knowledge.`,
+      })
+    }
+  }
+
+  return items
+}
+
 async function buildWorkspaceRepoSummaries(manifest, localState, config) {
   const entries = Object.entries(manifest.repos ?? {}).sort(([left], [right]) => left.localeCompare(right))
 
@@ -1243,15 +1710,33 @@ async function loadWorkspaceSnapshot() {
   const config = await loadConfig()
   const workspace = await resolveActiveWorkspace(config)
   const localState = getWorkspaceState(config, workspace.workspaceRoot)
-  const repos = await buildWorkspaceRepoSummaries(workspace.manifest, localState, config)
+  const baseRepos = await buildWorkspaceRepoSummaries(workspace.manifest, localState, config)
+  const remoteSignals = await loadWorkspaceRemoteSignals({
+    config,
+    repos: baseRepos,
+  })
+  const repos = mergeWorkspaceRepoSignals(baseRepos, remoteSignals)
+  const inbox = remoteSignals.inbox
+  const knowledge = remoteSignals.knowledge
+  const attention = buildWorkspaceAttention(repos, remoteSignals.auth)
 
   return {
     workspace_root: workspace.workspaceRoot,
     workspace_name: workspace.manifest.name,
     repos,
+    sessions: remoteSignals.sessions,
+    inbox,
+    knowledge,
+    attention,
+    auth: remoteSignals.auth,
     counts: {
       active: repos.filter(repo => repo.status === 'active').length,
       blocked: repos.filter(repo => repo.status === 'blocked').length,
+      active_sessions: remoteSignals.sessions.length,
+      pending_messages: inbox.length,
+      knowledge_notes: knowledge.length,
+      candidate_notes: knowledge.filter(note => note.status === 'candidate').length,
+      attention: attention.length,
     },
     refreshed_at: new Date(),
   }
