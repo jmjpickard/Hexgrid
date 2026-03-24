@@ -162,7 +162,7 @@ function renderRepoRow(repo, width, selected) {
 }
 
 function renderSessionRow(session, width, selected, pendingCount) {
-  const mode = session.mode === 'listener' ? 'L' : 'A'
+  const mode = session.attached ? '@' : session.mode === 'listener' ? 'L' : session.managed_status ? 'M' : 'A'
   const runtime = truncate(session.runtime ?? 'unknown', 8)
   const repo = truncate(session.repo_id ?? 'unmapped', 14)
   const age = formatAge(session.last_heartbeat)
@@ -258,6 +258,13 @@ function buildOverviewColumns(snapshot, state, leftWidth, rightWidth) {
     { maxLines: 6 },
   )
 
+  if (selectedRepo.managed_session) {
+    appendSection(rightRows, 'Managed Session', [
+      `Runtime: ${selectedRepo.managed_session.runtime} | status: ${selectedRepo.managed_session.status} | attached: ${selectedRepo.managed_session.attached ? 'yes' : 'no'}`,
+      selectedRepo.managed_session.error ? `Error: ${selectedRepo.managed_session.error}` : 'Error: none',
+    ], rightWidth)
+  }
+
   appendSection(
     rightRows,
     'Live Agents',
@@ -325,6 +332,8 @@ function buildSessionsColumns(snapshot, state, leftWidth, rightWidth) {
   appendSection(rightRows, selectedSession.name, [
     `Repo: ${selectedSession.repo_id ?? 'unmapped'} | runtime: ${selectedSession.runtime} | mode: ${selectedSession.mode}`,
     `Hex: ${selectedSession.hex_id} | connected ${formatAge(selectedSession.connected_at)} | heartbeat ${formatAge(selectedSession.last_heartbeat)}`,
+    selectedSession.managed_status ? `Managed: ${selectedSession.managed_status}${selectedSession.attached ? ' (attached)' : ''}` : 'Managed: remote only',
+    selectedSession.local_error ? `Local error: ${selectedSession.local_error}` : 'Local error: none',
     selectedSession.description ? `Description: ${selectedSession.description}` : 'Description: n/a',
   ], rightWidth)
 
@@ -469,7 +478,7 @@ function renderControlCenter({ width, height, snapshot, state, footerMessage }) 
   const rightWidth = usableWidth - leftWidth - 3
 
   const remoteRow = snapshot.auth.status === 'connected'
-    ? `Remote: connected${snapshot.auth.email ? ` as ${snapshot.auth.email}` : ''}  sessions: ${snapshot.counts.active_sessions}  inbox: ${snapshot.counts.pending_messages}  knowledge: ${snapshot.counts.knowledge_notes}  refreshed: ${formatClock(snapshot.refreshed_at)}`
+    ? `Remote: connected${snapshot.auth.email ? ` as ${snapshot.auth.email}` : ''}  sessions: ${snapshot.counts.active_sessions}  managed: ${snapshot.counts.managed_sessions ?? 0}  inbox: ${snapshot.counts.pending_messages}  knowledge: ${snapshot.counts.knowledge_notes}  refreshed: ${formatClock(snapshot.refreshed_at)}`
     : `Remote: ${snapshot.auth.status}${snapshot.auth.error ? `  ${snapshot.auth.error}` : ''}  refreshed: ${formatClock(snapshot.refreshed_at)}`
 
   const headerRows = [
@@ -496,14 +505,14 @@ function renderControlCenter({ width, height, snapshot, state, footerMessage }) 
     lines.push(`${pad(truncate(left, leftWidth), leftWidth)} | ${pad(truncate(right, rightWidth), rightWidth)}`)
   }
 
-  const defaultFooter = '[o/s/i/n] view  [j/k] move  [Enter] focus repo  [r] run  [u] refresh  [q] quit'
+  const defaultFooter = '[o/s/i/n] view  [j/k] move  [Enter] focus repo  [r] start  [a] attach  [x] stop  [u] refresh  [q] quit'
   lines.push(line(usableWidth))
   lines.push(truncate(footerMessage || defaultFooter, usableWidth))
 
   return lines.slice(0, usableHeight).join('\n')
 }
 
-export async function runWorkspaceTui({ loadSnapshot, runRepo }) {
+export async function runWorkspaceTui({ loadSnapshot, startRepo, attachRepo, stopRepo }) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error('The TUI requires an interactive terminal.')
   }
@@ -533,7 +542,7 @@ export async function runWorkspaceTui({ loadSnapshot, runRepo }) {
   }
 
   const render = () => {
-    if (closed) return
+    if (closed || state.mode === 'attached') return
     clampSelections()
     process.stdout.write('\x1b[H\x1b[2J')
     process.stdout.write(renderControlCenter({
@@ -569,14 +578,30 @@ export async function runWorkspaceTui({ loadSnapshot, runRepo }) {
     process.stdout.write('\x1b[?25h\x1b[?1049l')
   }
 
-  const suspendForAction = async (action) => {
+  const runManagedSession = async (repoId, runtime) => {
+    try {
+      await startRepo(repoId, runtime)
+      footerMessage = `Started ${repoId} (${runtime}).`
+      await refresh(footerMessage)
+      await attachManagedSession(repoId)
+    } catch (err) {
+      footerMessage = err instanceof Error ? err.message : String(err)
+      render()
+    }
+  }
+
+  const attachManagedSession = async (repoId) => {
+    state.mode = 'attached'
     exitUi()
     try {
-      await action()
-      footerMessage = 'Action completed.'
+      const result = await attachRepo(repoId)
+      footerMessage = result?.reason === 'exited'
+        ? `Session ${repoId} exited while attached.`
+        : `Detached from ${repoId}.`
     } catch (err) {
       footerMessage = err instanceof Error ? err.message : String(err)
     } finally {
+      state.mode = 'normal'
       enterUi()
       await refresh(footerMessage)
     }
@@ -622,6 +647,7 @@ export async function runWorkspaceTui({ loadSnapshot, runRepo }) {
 
   const onKeypress = async (_, key = {}) => {
     if (closed) return
+    if (state.mode === 'attached') return
 
     if (key.ctrl && key.name === 'c') {
       finish()
@@ -646,13 +672,13 @@ export async function runWorkspaceTui({ loadSnapshot, runRepo }) {
 
       if (key.name === 'c') {
         state.mode = 'normal'
-        await suspendForAction(() => runRepo(repoId, 'codex'))
+        await runManagedSession(repoId, 'codex')
         return
       }
 
       if (key.name === 'l') {
         state.mode = 'normal'
-        await suspendForAction(() => runRepo(repoId, 'claude'))
+        await runManagedSession(repoId, 'claude')
         return
       }
 
@@ -738,8 +764,26 @@ export async function runWorkspaceTui({ loadSnapshot, runRepo }) {
 
     if (key.name === 'r' && currentRepoId()) {
       state.mode = 'run-picker'
-      footerMessage = `Run ${currentRepoId()}: [c] codex  [l] claude  [Esc] cancel`
+      footerMessage = `Start ${currentRepoId()}: [c] codex  [l] claude  [Esc] cancel`
       render()
+      return
+    }
+
+    if (key.name === 'a' && currentRepoId()) {
+      await attachManagedSession(currentRepoId())
+      return
+    }
+
+    if (key.name === 'x' && currentRepoId()) {
+      const repoId = currentRepoId()
+      try {
+        await stopRepo(repoId)
+        await refresh(`Stopping ${repoId}...`)
+      } catch (err) {
+        footerMessage = err instanceof Error ? err.message : String(err)
+        render()
+      }
+      return
     }
   }
 

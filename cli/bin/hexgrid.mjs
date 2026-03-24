@@ -21,6 +21,7 @@ import {
   upsertWorkspaceRepoBinding,
 } from '../src/workspace.mjs'
 import { runWorkspaceTui } from '../src/tui.mjs'
+import { createSessionSupervisor } from '../src/session-supervisor.mjs'
 
 const DEFAULT_API_URL = process.env.HEXGRID_API_URL ?? 'https://api.hexgrid.app'
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'hexgrid', 'config.json')
@@ -202,6 +203,15 @@ function runGit(args) {
 function commandExists(command) {
   const result = spawnSync('sh', ['-lc', `command -v ${command}`], { stdio: 'ignore' })
   return result.status === 0
+}
+
+function resolveCommandPath(command) {
+  const result = spawnSync('sh', ['-lc', `command -v ${JSON.stringify(command)}`], {
+    encoding: 'utf8',
+  })
+  if (result.status !== 0) return null
+  const value = result.stdout.trim()
+  return value || null
 }
 
 function readJsonMaybe(filePath) {
@@ -1668,9 +1678,122 @@ function buildWorkspaceAttention(repos, auth) {
         detail: `${repo.candidate_notes.length} candidate note${repo.candidate_notes.length === 1 ? '' : 's'} can be promoted into canonical knowledge.`,
       })
     }
+
+    if (repo.managed_session?.status === 'errored') {
+      items.push({
+        severity: 'error',
+        repo_id: repo.repo_id,
+        label: `${repo.repo_id} managed session failed`,
+        detail: repo.managed_session.error ?? 'The local PTY session exited with an error.',
+      })
+    }
   }
 
   return items
+}
+
+function mergeManagedSupervisorState(repos, sessions, supervisor) {
+  if (!supervisor) {
+    return {
+      repos,
+      sessions,
+      managed_sessions: [],
+    }
+  }
+
+  const managedSessions = supervisor.listSessions()
+  const managedByRepo = new Map(managedSessions.map(session => [session.repo_id, session]))
+
+  const nextRepos = repos.map(repo => {
+    const managedSession = managedByRepo.get(repo.repo_id) ?? null
+    const nextRepo = {
+      ...repo,
+      managed_session: managedSession,
+    }
+
+    if (!managedSession) return nextRepo
+
+    if (['starting', 'running', 'stopping'].includes(managedSession.status) && nextRepo.status !== 'blocked') {
+      nextRepo.status = 'active'
+    }
+
+    if (managedSession.status === 'starting') {
+      nextRepo.attention = [
+        `Managed ${managedSession.runtime} session is starting.`,
+        ...nextRepo.attention,
+      ]
+    }
+
+    if (managedSession.status === 'stopping') {
+      nextRepo.attention = [
+        'Managed session is stopping.',
+        ...nextRepo.attention,
+      ]
+    }
+
+    if (managedSession.status === 'errored') {
+      nextRepo.attention = [
+        `Managed session error: ${managedSession.error ?? 'unknown error'}`,
+        ...nextRepo.attention,
+      ]
+    }
+
+    if (managedSession.attached) {
+      nextRepo.attention = [
+        'Managed session is currently attached in this terminal.',
+        ...nextRepo.attention,
+      ]
+    }
+
+    return nextRepo
+  })
+
+  const nextSessions = sessions.map(session => {
+    const managedSession = managedByRepo.get(session.repo_id)
+    if (!managedSession) return session
+
+    return {
+      ...session,
+      managed_status: managedSession.status,
+      attached: managedSession.attached,
+      local_error: managedSession.error,
+      buffer_preview: managedSession.buffer_preview,
+    }
+  })
+
+  const reposWithRemoteSessions = new Set(nextSessions.map(session => session.repo_id))
+  for (const managedSession of managedSessions) {
+    if (reposWithRemoteSessions.has(managedSession.repo_id)) continue
+    if (managedSession.status === 'stopped' && !managedSession.error) continue
+
+    nextSessions.push({
+      session_id: managedSession.session_id ?? `local:${managedSession.repo_id}`,
+      name: managedSession.name ?? `${managedSession.repo_id}-${managedSession.runtime}`,
+      repo_id: managedSession.repo_id,
+      repo_url: null,
+      hex_id: managedSession.hex_id,
+      description: managedSession.error,
+      capabilities: [],
+      runtime: managedSession.runtime,
+      mode: 'interactive',
+      status: managedSession.status === 'errored' ? 'errored' : 'active',
+      connected_at: managedSession.started_at,
+      disconnected_at: managedSession.exited_at,
+      last_heartbeat: managedSession.last_output_at,
+      managed_status: managedSession.status,
+      attached: managedSession.attached,
+      local_error: managedSession.error,
+      buffer_preview: managedSession.buffer_preview,
+    })
+  }
+
+  nextSessions.sort((left, right) => Number(right.last_heartbeat ?? right.connected_at ?? 0) - Number(left.last_heartbeat ?? left.connected_at ?? 0))
+
+  return {
+    repos: nextRepos,
+    sessions: nextSessions,
+    managed_sessions: managedSessions,
+  }
 }
 
 async function buildWorkspaceRepoSummaries(manifest, localState, config) {
@@ -1706,7 +1829,7 @@ async function buildWorkspaceRepoSummaries(manifest, localState, config) {
   }))
 }
 
-async function loadWorkspaceSnapshot() {
+async function loadWorkspaceSnapshot({ supervisor = null } = {}) {
   const config = await loadConfig()
   const workspace = await resolveActiveWorkspace(config)
   const localState = getWorkspaceState(config, workspace.workspaceRoot)
@@ -1715,16 +1838,28 @@ async function loadWorkspaceSnapshot() {
     config,
     repos: baseRepos,
   })
-  const repos = mergeWorkspaceRepoSignals(baseRepos, remoteSignals)
+  const mergedRepos = mergeWorkspaceRepoSignals(baseRepos, remoteSignals)
+  const managedState = mergeManagedSupervisorState(
+    mergedRepos,
+    remoteSignals.sessions,
+    supervisor,
+  )
+  const repos = managedState.repos
   const inbox = remoteSignals.inbox
   const knowledge = remoteSignals.knowledge
   const attention = buildWorkspaceAttention(repos, remoteSignals.auth)
+  const activeSessionCount = managedState.sessions.filter(session =>
+    session.status === 'active'
+    || session.managed_status === 'starting'
+    || session.managed_status === 'stopping',
+  ).length
 
   return {
     workspace_root: workspace.workspaceRoot,
     workspace_name: workspace.manifest.name,
     repos,
-    sessions: remoteSignals.sessions,
+    sessions: managedState.sessions,
+    managed_sessions: managedState.managed_sessions,
     inbox,
     knowledge,
     attention,
@@ -1732,7 +1867,8 @@ async function loadWorkspaceSnapshot() {
     counts: {
       active: repos.filter(repo => repo.status === 'active').length,
       blocked: repos.filter(repo => repo.status === 'blocked').length,
-      active_sessions: remoteSignals.sessions.length,
+      active_sessions: activeSessionCount,
+      managed_sessions: managedState.managed_sessions.filter(session => ['starting', 'running', 'stopping'].includes(session.status)).length,
       pending_messages: inbox.length,
       knowledge_notes: knowledge.length,
       candidate_notes: knowledge.filter(note => note.status === 'candidate').length,
@@ -1807,13 +1943,118 @@ async function commandWorkspace(args) {
   throw new Error(`Unsupported workspace command "${subcommand}". Use \`hexgrid workspace init\` or \`hexgrid workspace\`.`)
 }
 
-async function commandTui() {
-  await runWorkspaceTui({
-    loadSnapshot: loadWorkspaceSnapshot,
-    runRepo: async (repoId, runtime) => {
-      await commandRepo(['run', repoId, '--runtime', runtime])
-    },
+async function prepareManagedRepoLaunch({ repoId, runtime }) {
+  const config = await loadConfig()
+  const apiUrl = resolveApiUrl([], config)
+  const token = resolveToken(config)
+  await assertLoggedIn(apiUrl, token)
+  await assertApiHealthy(apiUrl)
+
+  const workspace = await resolveActiveWorkspace(config)
+  const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
+  const repoPath = typeof binding?.path === 'string' ? binding.path : null
+  if (!repoPath) {
+    throw new Error(`Repo "${repoId}" has no local path binding. Re-run \`hexgrid repo add ${repoId} --path ...\`.`)
+  }
+  if (!(await fileExists(repoPath))) {
+    throw new Error(`Repo path does not exist: ${repoPath}`)
+  }
+
+  const repo = workspace.manifest.repos?.[repoId] ?? {}
+  const selectedRuntime = parseRuntime(runtime ?? repo.defaultRuntime ?? 'codex', {
+    allowAll: false,
+    fallback: repo.defaultRuntime ?? 'codex',
   })
+  const runtimeCommand = selectedRuntime === 'codex' ? 'codex' : 'claude'
+  const commandPath = resolveCommandPath(runtimeCommand)
+  if (!commandPath) {
+    throw new Error(`Runtime "${runtimeCommand}" was not found in PATH.`)
+  }
+
+  return withWorkingDirectory(repoPath, async () => {
+    const context = await detectRepoContext()
+    await setupRuntimes({
+      runtimes: [selectedRuntime],
+      repoRoot: context.repoRoot,
+      apiUrl,
+      token,
+    })
+
+    const name = `${context.repoName}-${selectedRuntime}`
+    const description = `${selectedRuntime} session for ${context.repoName} (${context.repoType})`
+    const connected = await connectRepoSession({
+      config,
+      apiUrl,
+      token,
+      context,
+      runtime: selectedRuntime,
+      name,
+      description,
+    })
+    const sessionId = connected.session_id
+
+    return {
+      repo_id: repoId,
+      runtime: selectedRuntime,
+      command: commandPath,
+      args: [],
+      cwd: context.repoRoot,
+      env: {
+        ...process.env,
+        HEXGRID_API_KEY: token,
+        HEXGRID_API_URL: apiUrl,
+        HEXGRID_SESSION_ID: sessionId,
+      },
+      heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
+      session_id: sessionId,
+      hex_id: connected.hex_id,
+      name,
+      async heartbeat() {
+        const heartbeat = await requestJson(apiUrl, '/api/cli/heartbeat', {
+          method: 'POST',
+          token,
+          body: { session_id: sessionId },
+        })
+        if (!heartbeat.response.ok) {
+          throw new Error(heartbeat.data.error ?? `Heartbeat failed (${heartbeat.response.status})`)
+        }
+        return heartbeat.data
+      },
+      async disconnect() {
+        const latestConfig = await loadConfig()
+        await disconnectRepoSession({
+          config: latestConfig,
+          apiUrl,
+          token,
+          sessionId,
+          repoRoot: context.repoRoot,
+        })
+      },
+    }
+  })
+}
+
+async function commandTui() {
+  const supervisor = createSessionSupervisor({
+    prepareLaunch: prepareManagedRepoLaunch,
+  })
+
+  try {
+    await runWorkspaceTui({
+      loadSnapshot: () => loadWorkspaceSnapshot({ supervisor }),
+      startRepo: async (repoId, runtime) => supervisor.startSession(repoId, runtime, {
+        cols: process.stdout.columns ?? 120,
+        rows: process.stdout.rows ?? 40,
+      }),
+      attachRepo: async (repoId) => supervisor.attach(repoId, {
+        stdin: process.stdin,
+        stdout: process.stdout,
+      }),
+      stopRepo: async (repoId) => supervisor.stopSession(repoId),
+    })
+  } finally {
+    await supervisor.shutdown()
+  }
 }
 
 async function commandRepo(args) {
