@@ -214,6 +214,20 @@ function focusRepo(state, snapshot, repoId) {
   return true
 }
 
+function previewLinesForSession(session, emptyMessage = 'No output captured yet.') {
+  if (!session) return [emptyMessage]
+  const status = session.managed_status ?? session.status
+  if (status === 'running') {
+    return [
+      'Interactive terminal output is hidden while detached.',
+      'Press [a] to attach and work inside the session.',
+    ]
+  }
+  return session.buffer_preview?.length > 0
+    ? session.buffer_preview.slice(-8)
+    : [emptyMessage]
+}
+
 function buildOverviewColumns(snapshot, state, leftWidth, rightWidth) {
   const repos = Array.isArray(snapshot.repos) ? snapshot.repos : []
   const selectedRepo = getSelectedRepo(snapshot, state)
@@ -270,9 +284,7 @@ function buildOverviewColumns(snapshot, state, leftWidth, rightWidth) {
     appendSection(
       rightRows,
       'Recent Output',
-      selectedRepo.managed_session.buffer_preview?.length > 0
-        ? selectedRepo.managed_session.buffer_preview.slice(-8)
-        : ['No output captured yet.'],
+      previewLinesForSession(selectedRepo.managed_session),
       rightWidth,
       { maxLines: 10 },
     )
@@ -377,11 +389,11 @@ function buildSessionsColumns(snapshot, state, leftWidth, rightWidth) {
     'Press [x] to stop it.',
   ], rightWidth)
 
-  if (selectedSession.buffer_preview?.length > 0) {
+  if (selectedSession.managed_status || selectedSession.buffer_preview?.length > 0) {
     appendSection(
       rightRows,
       'Recent Output',
-      selectedSession.buffer_preview.slice(-8),
+      previewLinesForSession(selectedSession),
       rightWidth,
       { maxLines: 10 },
     )

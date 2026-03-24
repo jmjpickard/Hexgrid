@@ -13,12 +13,22 @@ function nowSeconds() {
   return Math.floor(Date.now() / 1000)
 }
 
+function sanitizePreviewText(input) {
+  return String(input ?? '')
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B[@-Z\\-_]/g, '')
+    .replace(/\x1B/g, '')
+    .replace(/\r/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+}
+
 function appendOutput(session, chunk) {
-  const text = String(chunk ?? '')
+  const text = sanitizePreviewText(chunk)
   if (!text) return
 
   const next = `${session.partial_output}${text}`
-  const lines = next.replace(/\r/g, '').split('\n')
+  const lines = next.split('\n')
   session.partial_output = lines.pop() ?? ''
 
   for (const line of lines) {
