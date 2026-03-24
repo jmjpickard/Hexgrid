@@ -85,9 +85,10 @@ export function createSessionSupervisor({ prepareLaunch }) {
     }
 
     context.stdin.pause()
+    context.stdout.write('\x1b]0;HEXGRID CONTROL CENTER\x07')
 
     if (writeNotice) {
-      context.stdout.write(`\r\n[hexgrid] Detached from ${context.session.repo_id}.\r\n`)
+      context.stdout.write(`\r\n[hexgrid] Detached from ${context.session.repo_id}. Control center restored.\r\n`)
     }
 
     emit({ type: 'detached', repoId: context.session.repo_id, reason })
@@ -357,8 +358,11 @@ export function createSessionSupervisor({ prepareLaunch }) {
     }
 
     session.attached = true
+    stdout.write(`\x1b]0;HEXGRID ATTACHED ${repoId}  Ctrl+] to return\x07`)
     stdout.write('\x1b[2J\x1b[H')
-    stdout.write(`[hexgrid] Attached to ${repoId}. Press Ctrl+] to detach.\r\n`)
+    stdout.write(`[hexgrid] Attached to ${repoId}.\r\n`)
+    stdout.write('[hexgrid] Press Ctrl+] to return to the control center.\r\n')
+    stdout.write('[hexgrid] The dashboard is paused while this session owns the terminal.\r\n\r\n')
     if (session.buffer.length > 0) {
       stdout.write('[hexgrid] Recent output tail:\r\n')
       stdout.write(`${session.buffer.slice(-20).join('\r\n')}\r\n`)

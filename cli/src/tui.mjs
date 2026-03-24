@@ -262,7 +262,20 @@ function buildOverviewColumns(snapshot, state, leftWidth, rightWidth) {
     appendSection(rightRows, 'Managed Session', [
       `Runtime: ${selectedRepo.managed_session.runtime} | status: ${selectedRepo.managed_session.status} | attached: ${selectedRepo.managed_session.attached ? 'yes' : 'no'}`,
       selectedRepo.managed_session.error ? `Error: ${selectedRepo.managed_session.error}` : 'Error: none',
+      selectedRepo.managed_session.status === 'running'
+        ? 'Press [a] to attach. Press [x] to stop.'
+        : 'Press [r] to start or restart this runtime.',
     ], rightWidth)
+
+    appendSection(
+      rightRows,
+      'Recent Output',
+      selectedRepo.managed_session.buffer_preview?.length > 0
+        ? selectedRepo.managed_session.buffer_preview.slice(-8)
+        : ['No output captured yet.'],
+      rightWidth,
+      { maxLines: 10 },
+    )
   }
 
   appendSection(
@@ -359,8 +372,20 @@ function buildSessionsColumns(snapshot, state, leftWidth, rightWidth) {
 
   appendSection(rightRows, 'Actions', [
     'Press [Enter] to jump to the repo.',
-    'Press [r] to launch another runtime for the same repo.',
+    'Press [a] to attach to a managed session.',
+    'Press [r] to start or restart the runtime.',
+    'Press [x] to stop it.',
   ], rightWidth)
+
+  if (selectedSession.buffer_preview?.length > 0) {
+    appendSection(
+      rightRows,
+      'Recent Output',
+      selectedSession.buffer_preview.slice(-8),
+      rightWidth,
+      { maxLines: 10 },
+    )
+  }
 
   return { leftRows, rightRows }
 }
@@ -581,9 +606,8 @@ export async function runWorkspaceTui({ loadSnapshot, startRepo, attachRepo, sto
   const runManagedSession = async (repoId, runtime) => {
     try {
       await startRepo(repoId, runtime)
-      footerMessage = `Started ${repoId} (${runtime}).`
+      footerMessage = `Started ${repoId} (${runtime}). Press [a] to attach.`
       await refresh(footerMessage)
-      await attachManagedSession(repoId)
     } catch (err) {
       footerMessage = err instanceof Error ? err.message : String(err)
       render()
