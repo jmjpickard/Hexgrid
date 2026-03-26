@@ -34,7 +34,10 @@
         <aside class="sidebar">
           <div class="sidebar-header">
             <h2>Hexes</h2>
-            <div class="sidebar-meta" id="repoCount">0</div>
+            <div class="sidebar-actions">
+              <button type="button" class="sidebar-button" id="addHexButton">Add Hex</button>
+              <div class="sidebar-meta" id="repoCount">0</div>
+            </div>
           </div>
           <div class="repo-list" id="repoList"></div>
         </aside>
@@ -50,6 +53,47 @@
           </div>
         </section>
       </main>
+    </div>
+
+    <div class="modal-backdrop is-hidden" id="addHexModal">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="addHexTitle">
+        <div class="modal-header">
+          <div>
+            <div class="detail-label">Workspace</div>
+            <h3 id="addHexTitle">Add Hex</h3>
+          </div>
+          <button type="button" class="modal-close" id="addHexClose">close</button>
+        </div>
+        <p class="modal-copy">
+          Pick any folder or file on disk. New hexes onboard immediately and unlock runtimes when setup is complete.
+        </p>
+        <div class="picker-actions">
+          <button type="button" class="is-accent" id="pickFolderButton">Pick Folder</button>
+          <button type="button" id="pickFileButton">Pick File</button>
+        </div>
+        <div class="picker-preview" id="sourcePreview">No path selected yet.</div>
+        <form class="modal-form" id="addHexForm">
+          <label class="form-field">
+            <span>Hex ID</span>
+            <input type="text" id="repoIdInput" autocomplete="off" required>
+          </label>
+          <label class="form-field">
+            <span>Description</span>
+            <textarea id="repoDescriptionInput" rows="3" placeholder="Optional summary for this hex"></textarea>
+          </label>
+          <label class="form-field">
+            <span>Default runtime</span>
+            <select id="repoRuntimeInput">
+              <option value="codex">codex</option>
+              <option value="claude">claude</option>
+            </select>
+          </label>
+          <div class="modal-footer">
+            <button type="button" id="addHexCancel">Cancel</button>
+            <button type="submit" class="is-accent" id="addHexSubmit" disabled>Create Hex</button>
+          </div>
+        </form>
+      </div>
     </div>
 
     <script src="/vendor/xterm.js"></script>

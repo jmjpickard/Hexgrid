@@ -88,6 +88,9 @@ export async function startLocalUiServer({
   loadSnapshot,
   startRepo,
   stopRepo,
+  pickPath,
+  addRepo,
+  removeRepo,
   supervisor,
 }) {
   const authToken = crypto.randomUUID().replace(/-/g, '')
@@ -204,7 +207,23 @@ export async function startLocalUiServer({
         return
       }
 
-      let match = pathname.match(/^\/api\/repos\/([^/]+)\/(start|stop)$/)
+      if (pathname === '/api/picker' && req.method === 'POST') {
+        const body = await parseJsonBody(req)
+        const selection = await pickPath(body.kind ?? 'directory')
+        sendJson(res, 200, { ok: true, selection })
+        broadcastState({ type: 'picker-selection', at: Date.now() })
+        return
+      }
+
+      if (pathname === '/api/repos' && req.method === 'POST') {
+        const body = await parseJsonBody(req)
+        const repo = await addRepo(body)
+        sendJson(res, 200, { ok: true, repo })
+        broadcastState({ type: 'repo-added', repo_id: repo.repo_id, at: Date.now() })
+        return
+      }
+
+      let match = pathname.match(/^\/api\/repos\/([^/]+)\/(start|stop|remove)$/)
       if (match && req.method === 'POST') {
         const repoId = decodeURIComponent(match[1])
         const action = match[2]
@@ -213,6 +232,13 @@ export async function startLocalUiServer({
           const body = await parseJsonBody(req)
           const session = await startRepo(repoId, body.runtime ?? null)
           sendJson(res, 200, { ok: true, session })
+          return
+        }
+
+        if (action === 'remove') {
+          const repo = await removeRepo(repoId)
+          sendJson(res, 200, { ok: true, repo })
+          broadcastState({ type: 'repo-removed', repo_id: repoId, at: Date.now() })
           return
         }
 

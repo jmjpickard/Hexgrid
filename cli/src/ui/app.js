@@ -5,11 +5,23 @@
     workspaceName: document.getElementById('workspaceName'),
     statusCopy: document.getElementById('statusCopy'),
     repoCount: document.getElementById('repoCount'),
+    addHexButton: document.getElementById('addHexButton'),
     repoList: document.getElementById('repoList'),
     repoDetail: document.getElementById('repoDetail'),
     terminalTitle: document.getElementById('terminalTitle'),
     terminalMeta: document.getElementById('terminalMeta'),
     terminal: document.getElementById('terminal'),
+    addHexModal: document.getElementById('addHexModal'),
+    addHexClose: document.getElementById('addHexClose'),
+    addHexCancel: document.getElementById('addHexCancel'),
+    addHexForm: document.getElementById('addHexForm'),
+    pickFolderButton: document.getElementById('pickFolderButton'),
+    pickFileButton: document.getElementById('pickFileButton'),
+    sourcePreview: document.getElementById('sourcePreview'),
+    repoIdInput: document.getElementById('repoIdInput'),
+    repoDescriptionInput: document.getElementById('repoDescriptionInput'),
+    repoRuntimeInput: document.getElementById('repoRuntimeInput'),
+    addHexSubmit: document.getElementById('addHexSubmit'),
   }
 
   if (!token) {
@@ -28,6 +40,7 @@
     refreshTimer: null,
     pendingInput: '',
     pendingInputTimer: null,
+    selectedSource: null,
   }
 
   function escapeHtml(input) {
@@ -102,6 +115,62 @@
   function getSessionKey(repo) {
     const session = getManagedSession(repo)
     return session ? `${repo.repo_id}:${session.session_id}:${session.status}` : null
+  }
+
+  function isRepoOnboarding(repo) {
+    return repo?.onboarding?.status === 'running'
+  }
+
+  function hasRepoAttention(repo) {
+    return Array.isArray(repo?.attention) && repo.attention.length > 0
+  }
+
+  function canLaunchRepo(repo) {
+    return Boolean(repo && !isRepoOnboarding(repo) && repo.path && repo.path_exists)
+  }
+
+  function resetAddHexForm() {
+    state.selectedSource = null
+    refs.sourcePreview.textContent = 'No path selected yet.'
+    refs.repoIdInput.value = ''
+    refs.repoDescriptionInput.value = ''
+    refs.repoRuntimeInput.value = 'codex'
+    refs.addHexSubmit.disabled = true
+  }
+
+  function openAddHexModal() {
+    resetAddHexForm()
+    refs.addHexModal.classList.remove('is-hidden')
+  }
+
+  function closeAddHexModal() {
+    refs.addHexModal.classList.add('is-hidden')
+  }
+
+  function syncAddHexForm() {
+    const source = state.selectedSource
+    refs.sourcePreview.textContent = source
+      ? `${source.source_kind}: ${source.source_path}`
+      : 'No path selected yet.'
+    refs.addHexSubmit.disabled = !(source && refs.repoIdInput.value.trim())
+  }
+
+  async function pickSource(kind) {
+    setStatus(`Opening ${kind} picker…`)
+    try {
+      const result = await request('/api/picker', {
+        method: 'POST',
+        body: { kind },
+      })
+      state.selectedSource = result.selection
+      if (!refs.repoIdInput.value.trim()) {
+        refs.repoIdInput.value = result.selection.suggested_repo_id ?? ''
+      }
+      syncAddHexForm()
+      setStatus(`Selected ${result.selection.source_path}`)
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err))
+    }
   }
 
   function initTerminal() {
@@ -233,11 +302,15 @@
     if (!session) {
       disconnectTerminalStream()
       state.terminalSessionKey = null
-      refs.terminalMeta.textContent = 'not running'
+      refs.terminalMeta.textContent = isRepoOnboarding(repo) ? 'onboarding' : 'not running'
       showTerminalMessage([
-        `No local hex is running for ${repo.repo_id}.`,
+        isRepoOnboarding(repo)
+          ? `${repo.repo_id} is onboarding.`
+          : `No local hex is running for ${repo.repo_id}.`,
         '',
-        'Start Claude or Codex from this UI to open a local interactive terminal.',
+        isRepoOnboarding(repo)
+          ? 'Mandatory onboarding is still running. Runtimes will unlock when the initial setup and knowledge scan finish.'
+          : 'Start Claude or Codex from this UI to open a local interactive terminal.',
       ])
       return
     }
@@ -281,11 +354,20 @@
 
     refs.repoList.innerHTML = repos.map((repo) => {
       const selected = repo.repo_id === state.selectedRepoId ? 'is-selected' : ''
+      const active = repo.status === 'active' ? 'is-active' : ''
+      const onboarding = isRepoOnboarding(repo) ? 'is-onboarding' : ''
+      const attention = hasRepoAttention(repo) ? 'has-attention' : ''
       const local = getManagedSession(repo)
-      const runtimeLabel = local ? `${local.runtime} ${local.status}` : 'local idle'
+      const runtimeLabel = isRepoOnboarding(repo)
+        ? 'onboarding running'
+        : local
+          ? `${local.runtime} ${local.status}`
+          : 'local idle'
+      const runDisabled = canLaunchRepo(repo) ? '' : 'disabled'
+      const stopDisabled = local ? '' : 'disabled'
 
       return `
-        <div class="repo-card ${selected}" data-select-repo="${escapeHtml(repo.repo_id)}">
+        <div class="repo-card ${selected} ${active} ${onboarding} ${attention}" data-select-repo="${escapeHtml(repo.repo_id)}">
           <div class="repo-card-header">
             <div class="repo-card-title">${escapeHtml(repo.repo_id)}</div>
             <div class="repo-card-status">${escapeHtml(repo.status)}</div>
@@ -297,9 +379,9 @@
             <span class="repo-chip">${repo.counts?.candidate_notes ?? 0} notes</span>
           </div>
           <div class="repo-card-actions">
-            <button type="button" class="is-accent" data-start-runtime="codex" data-repo-id="${escapeHtml(repo.repo_id)}">Run Codex</button>
-            <button type="button" data-start-runtime="claude" data-repo-id="${escapeHtml(repo.repo_id)}">Run Claude</button>
-            <button type="button" class="is-danger" data-stop-repo="${escapeHtml(repo.repo_id)}">Stop</button>
+            <button type="button" class="is-accent" data-start-runtime="codex" data-repo-id="${escapeHtml(repo.repo_id)}" ${runDisabled}>Run Codex</button>
+            <button type="button" data-start-runtime="claude" data-repo-id="${escapeHtml(repo.repo_id)}" ${runDisabled}>Run Claude</button>
+            <button type="button" class="is-danger" data-stop-repo="${escapeHtml(repo.repo_id)}" ${stopDisabled}>Stop</button>
           </div>
         </div>
       `
@@ -341,6 +423,14 @@
     const local = getManagedSession(repo)
     const remoteSessionCount = repo.active_sessions?.length ?? 0
     const attention = repo.attention ?? []
+    const canLaunch = canLaunchRepo(repo)
+    const onboardingDetail = isRepoOnboarding(repo)
+      ? `Onboarding started ${formatAge(repo.onboarding?.started_at)}. New runtimes unlock when onboarding finishes.`
+      : repo.onboarding?.status === 'failed'
+        ? `Onboarding failed${repo.onboarding?.error ? `: ${repo.onboarding.error}` : '.'}`
+        : repo.onboarding?.status === 'complete'
+          ? `Completed ${formatAge(repo.onboarding?.completed_at)}.`
+          : 'No onboarding state is recorded for this hex.'
 
     refs.repoDetail.innerHTML = `
       <div class="repo-detail-header">
@@ -349,9 +439,10 @@
           <div class="repo-detail-copy">${escapeHtml(repo.description ?? 'No repo description yet.')}</div>
         </div>
         <div class="detail-actions">
-          <button type="button" class="is-accent" data-detail-start="codex">Run Codex</button>
-          <button type="button" data-detail-start="claude">Run Claude</button>
-          <button type="button" class="is-danger" data-detail-stop>Stop</button>
+          <button type="button" class="is-accent" data-detail-start="codex" ${canLaunch ? '' : 'disabled'}>Run Codex</button>
+          <button type="button" data-detail-start="claude" ${canLaunch ? '' : 'disabled'}>Run Claude</button>
+          <button type="button" class="is-danger" data-detail-stop ${local ? '' : 'disabled'}>Stop</button>
+          <button type="button" data-detail-remove ${isRepoOnboarding(repo) ? 'disabled' : ''}>Remove Hex</button>
         </div>
       </div>
 
@@ -376,6 +467,11 @@
       </div>
 
       <div class="detail-section">
+        <div class="detail-label">Onboarding</div>
+        <div class="repo-detail-copy">${escapeHtml(onboardingDetail)}</div>
+      </div>
+
+      <div class="detail-section">
         <div class="detail-label">Attention</div>
         <div>
           ${attention.length > 0
@@ -392,6 +488,11 @@
     const stopButton = refs.repoDetail.querySelector('[data-detail-stop]')
     if (stopButton) {
       stopButton.addEventListener('click', () => stopRepo(repo.repo_id))
+    }
+
+    const removeButton = refs.repoDetail.querySelector('[data-detail-remove]')
+    if (removeButton) {
+      removeButton.addEventListener('click', () => removeRepo(repo.repo_id))
     }
   }
 
@@ -455,6 +556,61 @@
     }
   }
 
+  async function createRepo() {
+    const source = state.selectedSource
+    if (!source) return
+
+    const repoId = refs.repoIdInput.value.trim()
+    if (!repoId) {
+      setStatus('Hex ID is required.')
+      return
+    }
+
+    refs.addHexSubmit.disabled = true
+    setStatus(`Creating ${repoId}…`)
+
+    try {
+      const result = await request('/api/repos', {
+        method: 'POST',
+        body: {
+          repo_id: repoId,
+          source_kind: source.source_kind,
+          source_path: source.source_path,
+          description: refs.repoDescriptionInput.value.trim() || null,
+          runtime: refs.repoRuntimeInput.value,
+        },
+      })
+      state.selectedRepoId = result.repo.repo_id
+      closeAddHexModal()
+      await loadSnapshot()
+      setStatus(`Added ${result.repo.repo_id}. Mandatory onboarding is running.`)
+    } catch (err) {
+      refs.addHexSubmit.disabled = false
+      setStatus(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function removeRepo(repoId) {
+    const repo = getRepo(repoId)
+    const confirmed = window.confirm(`Remove ${repoId} from this workspace? Memory will be kept.`)
+    if (!confirmed) return
+
+    setStatus(`Removing ${repoId}…`)
+    try {
+      await request(`/api/repos/${encodeURIComponent(repoId)}/remove`, {
+        method: 'POST',
+      })
+      if (state.selectedRepoId === repoId) {
+        state.selectedRepoId = null
+      }
+      await loadSnapshot()
+      setStatus(`Removed ${repoId} from this workspace.`)
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err))
+      if (repo) render()
+    }
+  }
+
   function connectControlStream() {
     const stream = new EventSource(apiUrl('/api/events'))
     stream.addEventListener('state', () => {
@@ -476,10 +632,29 @@
     if (state.controlStream) state.controlStream.close()
   })
 
+  refs.addHexButton.addEventListener('click', openAddHexModal)
+  refs.addHexClose.addEventListener('click', closeAddHexModal)
+  refs.addHexCancel.addEventListener('click', closeAddHexModal)
+  refs.pickFolderButton.addEventListener('click', () => pickSource('directory'))
+  refs.pickFileButton.addEventListener('click', () => pickSource('file'))
+  refs.repoIdInput.addEventListener('input', syncAddHexForm)
+  refs.addHexForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    createRepo().catch(() => {})
+  })
+  refs.addHexModal.addEventListener('click', (event) => {
+    if (event.target === refs.addHexModal) closeAddHexModal()
+  })
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !refs.addHexModal.classList.contains('is-hidden')) {
+      closeAddHexModal()
+    }
+  })
+
   connectControlStream()
   window.setInterval(() => {
     loadSnapshot().catch(() => {})
-  }, 10_000)
+  }, 4_000)
 
   loadSnapshot().catch((err) => {
     setStatus(err instanceof Error ? err.message : String(err))

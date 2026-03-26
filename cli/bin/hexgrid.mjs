@@ -15,6 +15,8 @@ import {
   loadWorkspaceManifest,
   loadWorkspaceManifestFromRoot,
   normaliseListenMode,
+  removeWorkspaceRepo,
+  removeWorkspaceRepoBinding,
   saveWorkspaceManifest,
   setCurrentWorkspace,
   upsertWorkspaceRepo,
@@ -62,6 +64,7 @@ Usage:
   hexgrid workspace init [--name NAME]
   hexgrid repo add <repo_id> [--path PATH] [--remote URL] [--description TEXT] [--runtime RUNTIME] [--listen MODE]
   hexgrid repo list
+  hexgrid repo remove <repo_id>
   hexgrid repo run <repo_id> [--runtime RUNTIME] [--name NAME] [--description TEXT] [--heartbeat-seconds N] [-- ...agent args]
   hexgrid repo listen <repo_id> [--runtime claude] [--capability CAP] [--name NAME] [--poll-seconds N]
   hexgrid login [--api-url URL] [--no-open] [--client-name NAME]
@@ -193,6 +196,37 @@ function openBrowser(url) {
   } catch {
     return false
   }
+}
+
+function choosePathViaNativePicker(kind = 'directory') {
+  const cleanKind = normaliseSourceKind(kind)
+
+  if (process.platform !== 'darwin') {
+    throw new Error('Native picker is currently implemented only on macOS.')
+  }
+
+  const script = cleanKind === 'file'
+    ? 'set selectedItem to POSIX path of (choose file with prompt "Select a file for this hex")'
+    : 'set selectedItem to POSIX path of (choose folder with prompt "Select a folder for this hex")'
+
+  const result = spawnSync('osascript', ['-e', script, '-e', 'return selectedItem'], {
+    encoding: 'utf8',
+  })
+
+  if (result.status !== 0) {
+    const detail = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim()
+    if (/User canceled/i.test(detail)) {
+      throw new Error('Selection cancelled.')
+    }
+    throw new Error(detail || 'Native picker failed.')
+  }
+
+  const selectedPath = result.stdout.trim()
+  if (!selectedPath) {
+    throw new Error('Native picker did not return a path.')
+  }
+
+  return path.resolve(selectedPath)
 }
 
 function runGit(args) {
@@ -810,14 +844,29 @@ async function generateOnboardingNotes(context) {
   return { analysis, notes }
 }
 
-async function detectRepoContext() {
-  const repoRoot = runGit(['rev-parse', '--show-toplevel']) ?? process.cwd()
+function buildLocalRepoUrl(repoRoot) {
+  return `local://${path.resolve(repoRoot)}`
+}
+
+async function detectRepoContext(startDir = process.cwd(), { exactPath = false, sourceFilePath = null } = {}) {
+  const resolvedStartDir = path.resolve(startDir)
+  const repoRoot = exactPath ? resolvedStartDir : resolveRepoRootFromPath(resolvedStartDir)
   const repoName = path.basename(repoRoot)
-  const repoUrl = runGit(['remote', 'get-url', 'origin']) ?? `local://${repoRoot}`
+  const remoteUrl = runGit(['-C', resolvedStartDir, 'remote', 'get-url', 'origin']) ?? null
+  const repoUrl = exactPath ? buildLocalRepoUrl(repoRoot) : (remoteUrl ?? buildLocalRepoUrl(repoRoot))
   const repoType = await detectRepoType(repoRoot)
   const tools = TOOL_CANDIDATES.filter(commandExists)
 
-  return { repoRoot, repoName, repoUrl, repoType, tools }
+  return {
+    repoRoot,
+    repoName,
+    repoUrl,
+    repoType,
+    tools,
+    remoteUrl,
+    workspacePath: resolvedStartDir,
+    sourceFilePath: sourceFilePath ? path.resolve(sourceFilePath) : null,
+  }
 }
 
 async function detectRepoType(repoRoot) {
@@ -890,6 +939,9 @@ async function ensureCodexSetup(repoRoot, mcpUrl) {
 
 const HEXGRID_CLAUDE_BLOCK_START = '<!-- BEGIN HEXGRID (managed by hexgrid setup) -->'
 const HEXGRID_CLAUDE_BLOCK_END = '<!-- END HEXGRID -->'
+const HEXGRID_GUIDE_FILE = 'HEXGRID.md'
+const HEXGRID_GUIDE_BLOCK_START = '<!-- BEGIN HEXGRID MEMORY CONTRACT -->'
+const HEXGRID_GUIDE_BLOCK_END = '<!-- END HEXGRID MEMORY CONTRACT -->'
 
 function renderClaudeHexgridBlock() {
   return [
@@ -922,9 +974,60 @@ function renderClaudeHexgridBlock() {
     '- Do not guess cross-repo details — ask. Answers are cached, so repeated questions are free.',
     '- Treat responses as authoritative context from the target codebase.',
     '- Always include `--context` so the answering agent understands why you need the information.',
+    `- Follow \`${HEXGRID_GUIDE_FILE}\` for the local memory and session wrap-up contract.`,
     '',
     HEXGRID_CLAUDE_BLOCK_END,
   ].join('\n')
+}
+
+function renderHexgridGuideBlock({ repoName, sourceFilePath = null }) {
+  return [
+    HEXGRID_GUIDE_BLOCK_START,
+    '',
+    '# HexGrid Memory Contract',
+    '',
+    `This hex is managed by HexGrid for \`${repoName}\`.`,
+    '',
+    '## Session rules',
+    '',
+    '- Before guessing cross-repo details, search or ask through HexGrid.',
+    '- When a session ends, publish a short session summary to HexGrid.',
+    '- If a reusable fact was learned, publish it as candidate knowledge with source refs.',
+    '- Keep notes small, specific, and tied to the files or commands that justified them.',
+    ...(sourceFilePath
+      ? [
+          '',
+          '## Initial focus',
+          '',
+          `- Seed file: \`${path.basename(sourceFilePath)}\``,
+          `- Path: \`${sourceFilePath}\``,
+        ]
+      : []),
+    '',
+    HEXGRID_GUIDE_BLOCK_END,
+  ].join('\n')
+}
+
+async function ensureHexgridProjectGuide(repoRoot, { repoName, sourceFilePath = null }) {
+  const guidePath = path.join(repoRoot, HEXGRID_GUIDE_FILE)
+  const block = renderHexgridGuideBlock({ repoName, sourceFilePath })
+
+  let nextContent = `${block}\n`
+  if (await fileExists(guidePath)) {
+    const current = await readFile(guidePath, 'utf8')
+    const escapedStart = HEXGRID_GUIDE_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const escapedEnd = HEXGRID_GUIDE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const managedRegex = new RegExp(`${escapedStart}[\\s\\S]*?${escapedEnd}`, 'm')
+
+    if (managedRegex.test(current)) {
+      nextContent = current.replace(managedRegex, block)
+    } else {
+      nextContent = `${block}\n\n${current.trimStart()}`
+    }
+  }
+
+  await writeFile(guidePath, nextContent)
+  return guidePath
 }
 
 async function ensureClaudeMcpSetup(repoRoot, mcpUrl, token) {
@@ -1064,6 +1167,22 @@ function validateRepoId(repoId) {
   return repoId
 }
 
+function deriveRepoIdCandidate(input) {
+  const base = String(input ?? '').trim().toLowerCase()
+  const cleaned = base
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+  return cleaned || 'hex'
+}
+
+function suggestRepoIdFromPath(repoPath, sourceKind = 'directory') {
+  const sourceName = sourceKind === 'file'
+    ? path.basename(repoPath, path.extname(repoPath))
+    : path.basename(repoPath)
+  return validateRepoId(deriveRepoIdCandidate(sourceName))
+}
+
 function stripFlagWithValue(args, name) {
   const next = []
 
@@ -1090,6 +1209,11 @@ function resolveRepoRootFromPath(repoPath) {
 
 function resolveRepoRemote(repoRoot) {
   return runGit(['-C', repoRoot, 'remote', 'get-url', 'origin']) ?? `local://${repoRoot}`
+}
+
+function resolveHexPathFromSelection(sourcePath, sourceKind = 'directory') {
+  const resolved = path.resolve(sourcePath)
+  return sourceKind === 'file' ? path.dirname(resolved) : resolved
 }
 
 function canPromptUser() {
@@ -1605,6 +1729,14 @@ function mergeWorkspaceRepoSignals(repos, remoteSignals) {
       merged.attention.push('Repo path is missing or no longer accessible.')
     }
 
+    if (merged.onboarding?.status === 'running') {
+      merged.attention.unshift('Mandatory onboarding is running for this hex.')
+    }
+
+    if (merged.onboarding?.status === 'failed') {
+      merged.attention.unshift(`Onboarding failed: ${merged.onboarding.error ?? 'unknown error'}`)
+    }
+
     if (merged.pending_messages.length > 0) {
       merged.attention.push(`${merged.pending_messages.length} pending message${merged.pending_messages.length === 1 ? '' : 's'} in the inbox.`)
     }
@@ -1618,7 +1750,9 @@ function mergeWorkspaceRepoSignals(repos, remoteSignals) {
     }
 
     if (authConnected) {
-      if (merged.active_sessions.length > 0) merged.status = 'active'
+      if (merged.onboarding?.status === 'running') merged.status = 'onboarding'
+      else if (merged.active_sessions.length > 0) merged.status = 'active'
+      else if (merged.onboarding?.status === 'failed') merged.status = 'blocked'
       else if (merged.path && !merged.path_exists) merged.status = 'blocked'
       else if (merged.path) merged.status = 'idle'
       else merged.status = 'unknown'
@@ -1663,6 +1797,24 @@ function buildWorkspaceAttention(repos, auth) {
         repo_id: repo.repo_id,
         label: `${repo.repo_id} path is missing`,
         detail: repo.path,
+      })
+    }
+
+    if (repo.onboarding?.status === 'running') {
+      items.push({
+        severity: 'info',
+        repo_id: repo.repo_id,
+        label: `${repo.repo_id} is onboarding`,
+        detail: 'Mandatory onboarding is still running.',
+      })
+    }
+
+    if (repo.onboarding?.status === 'failed') {
+      items.push({
+        severity: 'error',
+        repo_id: repo.repo_id,
+        label: `${repo.repo_id} onboarding failed`,
+        detail: repo.onboarding.error ?? 'Onboarding did not complete successfully.',
       })
     }
 
@@ -1718,7 +1870,11 @@ function mergeManagedSupervisorState(repos, sessions, supervisor) {
 
     if (!managedSession) return nextRepo
 
-    if (['starting', 'running', 'stopping'].includes(managedSession.status) && nextRepo.status !== 'blocked') {
+    if (
+      ['starting', 'running', 'stopping'].includes(managedSession.status)
+      && nextRepo.status !== 'blocked'
+      && nextRepo.status !== 'onboarding'
+    ) {
       nextRepo.status = 'active'
     }
 
@@ -1809,11 +1965,14 @@ async function buildWorkspaceRepoSummaries(manifest, localState, config) {
     const repoPath = typeof binding?.path === 'string' ? binding.path : null
     const pathExists = repoPath ? await fileExists(repoPath) : false
     const session = repoPath ? config.sessions?.[sessionKey(repoPath)] ?? null : null
+    const onboarding = binding?.onboarding ?? null
 
     let status = 'unknown'
     if (session) status = 'active'
     else if (repoPath && pathExists) status = 'idle'
     else if (repoPath && !pathExists) status = 'blocked'
+    if (onboarding?.status === 'running') status = 'onboarding'
+    if (onboarding?.status === 'failed') status = 'blocked'
 
     return {
       repo_id: repoId,
@@ -1823,6 +1982,10 @@ async function buildWorkspaceRepoSummaries(manifest, localState, config) {
       listen: repo.listen ?? 'manual',
       path: repoPath,
       path_exists: pathExists,
+      source_kind: binding?.source_kind ?? 'directory',
+      source_path: binding?.source_path ?? repoPath,
+      seed_file: binding?.seed_file ?? null,
+      onboarding,
       status,
       local_session: session ? {
         session_id: session.session_id,
@@ -1883,6 +2046,300 @@ async function loadWorkspaceSnapshot({ supervisor = null } = {}) {
   }
 }
 
+function nowEpochSeconds() {
+  return Math.floor(Date.now() / 1000)
+}
+
+function buildOnboardingState(status, extra = {}) {
+  return {
+    status,
+    updated_at: nowEpochSeconds(),
+    ...extra,
+  }
+}
+
+function normaliseSourceKind(kind) {
+  const value = String(kind ?? 'directory').trim().toLowerCase()
+  if (value !== 'directory' && value !== 'file') {
+    throw new Error('Unsupported source kind. Use "directory" or "file".')
+  }
+  return value
+}
+
+async function runOnboardingSession({ config, apiUrl, token, context, name, description }) {
+  const connected = await connectRepoSession({
+    config,
+    apiUrl,
+    token,
+    context,
+    runtime: 'onboard',
+    name,
+    description,
+  })
+
+  const sessionId = connected.session_id
+
+  try {
+    const { analysis, notes } = await generateOnboardingNotes(context)
+    const created = []
+    const capability = `repo:${context.repoName}`
+
+    for (const note of notes) {
+      const result = await writeKnowledgeNote(apiUrl, token, {
+        session_id: sessionId,
+        repo_url: context.repoUrl,
+        topic: note.topic,
+        content: note.content,
+        tags: note.tags,
+        kind: note.kind,
+        status: note.status,
+        confidence: note.confidence,
+        freshness: note.freshness,
+        source_refs: note.source_refs,
+        capability,
+      })
+
+      created.push({
+        id: result.id,
+        topic: result.topic,
+        kind: result.kind,
+        status: result.status,
+      })
+    }
+
+    return {
+      ok: true,
+      repo: context.repoName,
+      repo_url: context.repoUrl,
+      session_id: sessionId,
+      capability,
+      created,
+      needs_review: created.filter(note => note.status !== 'canonical').map(note => note.topic),
+      summary: {
+        repo_type: context.repoType,
+        units: analysis.units.map(unit => ({
+          path: unit.path,
+          ecosystem: unit.ecosystem,
+          frameworks: unit.frameworks,
+        })),
+        package_managers: analysis.packageManagers,
+        languages: analysis.languages,
+      },
+    }
+  } finally {
+    try {
+      const latestConfig = await loadConfig()
+      await disconnectRepoSession({
+        config: latestConfig,
+        apiUrl,
+        token,
+        sessionId,
+        repoRoot: context.repoRoot,
+      })
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.error(`Warning: failed to disconnect onboarding session ${sessionId} (${detail})`)
+    }
+  }
+}
+
+async function setWorkspaceRepoOnboardingState({ workspaceRoot, workspaceName, repoId, onboarding }) {
+  const config = await loadConfig()
+  const existingBinding = getWorkspaceRepoBinding(config, workspaceRoot, repoId)
+  if (!existingBinding) {
+    throw new Error(`Repo "${repoId}" is not bound in workspace "${workspaceName}".`)
+  }
+
+  const nextConfig = upsertWorkspaceRepoBinding(
+    config,
+    workspaceRoot,
+    workspaceName,
+    repoId,
+    {
+      ...existingBinding,
+      onboarding,
+    },
+  )
+
+  await saveConfig(nextConfig)
+  return nextConfig
+}
+
+async function createWorkspaceRepoFromSelection({
+  repoId,
+  sourcePath,
+  sourceKind,
+  description = null,
+  defaultRuntime = 'codex',
+  listen = 'manual',
+}) {
+  const config = await loadConfig()
+  const workspace = await resolveActiveWorkspace(config)
+  const cleanRepoId = validateRepoId(repoId)
+  const cleanSourceKind = normaliseSourceKind(sourceKind)
+  const cleanSourcePath = path.resolve(sourcePath)
+
+  if (!(await fileExists(cleanSourcePath))) {
+    throw new Error(`Selected path does not exist: ${cleanSourcePath}`)
+  }
+
+  if (workspace.manifest.repos?.[cleanRepoId]) {
+    throw new Error(`Repo "${cleanRepoId}" already exists in this workspace.`)
+  }
+
+  const hexPath = resolveHexPathFromSelection(cleanSourcePath, cleanSourceKind)
+  const context = await detectRepoContext(hexPath, {
+    exactPath: true,
+    sourceFilePath: cleanSourceKind === 'file' ? cleanSourcePath : null,
+  })
+
+  const manifest = upsertWorkspaceRepo(workspace.manifest, cleanRepoId, {
+    remote: context.remoteUrl ?? buildLocalRepoUrl(hexPath),
+    description,
+    defaultRuntime: parseRuntime(defaultRuntime, { allowAll: false, fallback: 'codex' }),
+    listen: normaliseListenMode(listen),
+  })
+  await saveWorkspaceManifest(workspace.workspaceRoot, manifest)
+
+  const nextConfig = upsertWorkspaceRepoBinding(
+    config,
+    workspace.workspaceRoot,
+    manifest.name,
+    cleanRepoId,
+    {
+      path: hexPath,
+      source_kind: cleanSourceKind,
+      source_path: cleanSourcePath,
+      seed_file: cleanSourceKind === 'file' ? cleanSourcePath : null,
+      onboarding: buildOnboardingState('running', {
+        started_at: nowEpochSeconds(),
+      }),
+    },
+  )
+  await saveConfig(nextConfig)
+
+  return {
+    workspace_root: workspace.workspaceRoot,
+    workspace_name: manifest.name,
+    repo_id: cleanRepoId,
+    path: hexPath,
+    source_kind: cleanSourceKind,
+    source_path: cleanSourcePath,
+    default_runtime: manifest.repos[cleanRepoId]?.defaultRuntime ?? 'codex',
+  }
+}
+
+async function runWorkspaceRepoOnboarding({ workspaceRoot, repoId }) {
+  const config = await loadConfig()
+  const workspace = await loadWorkspaceManifestFromRoot(workspaceRoot)
+  if (!workspace) throw new Error(`Workspace not found: ${workspaceRoot}`)
+
+  const binding = getWorkspaceRepoBinding(config, workspaceRoot, repoId)
+  if (!binding?.path) throw new Error(`Repo "${repoId}" has no local path binding.`)
+
+  const repo = workspace.manifest.repos?.[repoId]
+  if (!repo) throw new Error(`Repo "${repoId}" is no longer registered.`)
+
+  const apiUrl = resolveApiUrl([], config)
+  const token = resolveToken(config)
+  await assertLoggedIn(apiUrl, token)
+  await assertApiHealthy(apiUrl)
+
+  const context = await detectRepoContext(binding.path, {
+    exactPath: true,
+    sourceFilePath: binding.seed_file ?? null,
+  })
+
+  await ensureHexgridProjectGuide(context.repoRoot, {
+    repoName: repoId,
+    sourceFilePath: binding.seed_file ?? null,
+  })
+
+  await setupRuntimes({
+    runtimes: [repo.defaultRuntime ?? 'codex'],
+    repoRoot: context.repoRoot,
+    apiUrl,
+    token,
+  })
+
+  const onboardingResult = await runOnboardingSession({
+    config,
+    apiUrl,
+    token,
+    context,
+    name: `${repoId}-onboard`,
+    description: `onboarding session for ${repoId}`,
+  })
+
+  await setWorkspaceRepoOnboardingState({
+    workspaceRoot,
+    workspaceName: workspace.manifest.name,
+    repoId,
+    onboarding: buildOnboardingState('complete', {
+      started_at: binding.onboarding?.started_at ?? nowEpochSeconds(),
+      completed_at: nowEpochSeconds(),
+    }),
+  })
+
+  return onboardingResult
+}
+
+async function markWorkspaceRepoOnboardingFailed({ workspaceRoot, repoId, error }) {
+  const config = await loadConfig()
+  const workspace = await loadWorkspaceManifestFromRoot(workspaceRoot)
+  if (!workspace) return
+  const binding = getWorkspaceRepoBinding(config, workspaceRoot, repoId)
+  if (!binding) return
+
+  await setWorkspaceRepoOnboardingState({
+    workspaceRoot,
+    workspaceName: workspace.manifest.name,
+    repoId,
+    onboarding: buildOnboardingState('failed', {
+      started_at: binding.onboarding?.started_at ?? nowEpochSeconds(),
+      error: truncateText(error instanceof Error ? error.message : String(error), 500),
+    }),
+  })
+}
+
+async function removeWorkspaceRepoById({ workspaceRoot, repoId }) {
+  const config = await loadConfig()
+  const workspace = await loadWorkspaceManifestFromRoot(workspaceRoot)
+  if (!workspace) throw new Error(`Workspace not found: ${workspaceRoot}`)
+
+  const repo = workspace.manifest.repos?.[repoId]
+  if (!repo) throw new Error(`Repo "${repoId}" is not registered in this workspace.`)
+
+  const binding = getWorkspaceRepoBinding(config, workspaceRoot, repoId)
+  if (binding?.onboarding?.status === 'running') {
+    throw new Error(`Repo "${repoId}" is still onboarding. Wait for onboarding to finish before removing it.`)
+  }
+
+  const manifest = removeWorkspaceRepo(workspace.manifest, repoId)
+  await saveWorkspaceManifest(workspaceRoot, manifest)
+
+  const nextConfig = removeWorkspaceRepoBinding(
+    config,
+    workspaceRoot,
+    workspace.manifest.name,
+    repoId,
+  )
+
+  if (binding?.path) {
+    const sessions = { ...(nextConfig.sessions ?? {}) }
+    delete sessions[sessionKey(binding.path)]
+    nextConfig.sessions = sessions
+  }
+
+  await saveConfig(nextConfig)
+  return {
+    ok: true,
+    workspace_root: workspaceRoot,
+    workspace_name: workspace.manifest.name,
+    repo_id: repoId,
+  }
+}
+
 async function resolveActiveWorkspace(config, { startDir = process.cwd(), required = true } = {}) {
   const localWorkspace = await loadWorkspaceManifest(startDir)
   if (localWorkspace) return localWorkspace
@@ -1906,6 +2363,16 @@ async function resolveActiveWorkspace(config, { startDir = process.cwd(), requir
   }
 
   throw new Error('No workspace found. Run `hexgrid workspace init` in your workspace root first.')
+}
+
+function assertWorkspaceRepoReadyForLaunch(repoId, binding) {
+  if (binding?.onboarding?.status === 'running') {
+    throw new Error(`Repo "${repoId}" is still onboarding. Wait for onboarding to finish before launching a runtime.`)
+  }
+
+  if (binding?.onboarding?.status === 'failed') {
+    throw new Error(`Repo "${repoId}" failed onboarding. Re-add the hex or fix the onboarding error before launching a runtime.`)
+  }
 }
 
 async function commandWorkspace(args) {
@@ -1958,6 +2425,7 @@ async function prepareManagedRepoLaunch({ repoId, runtime }) {
   const workspace = await resolveActiveWorkspace(config)
   const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
   const repoPath = typeof binding?.path === 'string' ? binding.path : null
+  assertWorkspaceRepoReadyForLaunch(repoId, binding)
   if (!repoPath) {
     throw new Error(`Repo "${repoId}" has no local path binding. Re-run \`hexgrid repo add ${repoId} --path ...\`.`)
   }
@@ -1986,68 +2454,69 @@ async function prepareManagedRepoLaunch({ repoId, runtime }) {
   ]).join(path.delimiter)
   const shellCommand = `exec ${shellEscape(commandPath)}`
 
-  return withWorkingDirectory(repoPath, async () => {
-    const context = await detectRepoContext()
-    await setupRuntimes({
-      runtimes: [selectedRuntime],
-      repoRoot: context.repoRoot,
-      apiUrl,
-      token,
-    })
-
-    const name = `${context.repoName}-${selectedRuntime}`
-    const description = `${selectedRuntime} session for ${context.repoName} (${context.repoType})`
-    const connected = await connectRepoSession({
-      config,
-      apiUrl,
-      token,
-      context,
-      runtime: selectedRuntime,
-      name,
-      description,
-    })
-    const sessionId = connected.session_id
-
-    return {
-      repo_id: repoId,
-      runtime: selectedRuntime,
-      command: shellPath,
-      args: ['-lc', shellCommand],
-      cwd: context.repoRoot,
-      env: {
-        ...process.env,
-        PATH: launchPath,
-        HEXGRID_API_KEY: token,
-        HEXGRID_API_URL: apiUrl,
-        HEXGRID_SESSION_ID: sessionId,
-      },
-      heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
-      session_id: sessionId,
-      hex_id: connected.hex_id,
-      name,
-      async heartbeat() {
-        const heartbeat = await requestJson(apiUrl, '/api/cli/heartbeat', {
-          method: 'POST',
-          token,
-          body: { session_id: sessionId },
-        })
-        if (!heartbeat.response.ok) {
-          throw new Error(heartbeat.data.error ?? `Heartbeat failed (${heartbeat.response.status})`)
-        }
-        return heartbeat.data
-      },
-      async disconnect() {
-        const latestConfig = await loadConfig()
-        await disconnectRepoSession({
-          config: latestConfig,
-          apiUrl,
-          token,
-          sessionId,
-          repoRoot: context.repoRoot,
-        })
-      },
-    }
+  const context = await detectRepoContext(repoPath, {
+    exactPath: true,
+    sourceFilePath: binding?.seed_file ?? null,
   })
+  await setupRuntimes({
+    runtimes: [selectedRuntime],
+    repoRoot: context.repoRoot,
+    apiUrl,
+    token,
+  })
+
+  const name = `${context.repoName}-${selectedRuntime}`
+  const description = `${selectedRuntime} session for ${context.repoName} (${context.repoType})`
+  const connected = await connectRepoSession({
+    config,
+    apiUrl,
+    token,
+    context,
+    runtime: selectedRuntime,
+    name,
+    description,
+  })
+  const sessionId = connected.session_id
+
+  return {
+    repo_id: repoId,
+    runtime: selectedRuntime,
+    command: shellPath,
+    args: ['-lc', shellCommand],
+    cwd: context.repoRoot,
+    env: {
+      ...process.env,
+      PATH: launchPath,
+      HEXGRID_API_KEY: token,
+      HEXGRID_API_URL: apiUrl,
+      HEXGRID_SESSION_ID: sessionId,
+    },
+    heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
+    session_id: sessionId,
+    hex_id: connected.hex_id,
+    name,
+    async heartbeat() {
+      const heartbeat = await requestJson(apiUrl, '/api/cli/heartbeat', {
+        method: 'POST',
+        token,
+        body: { session_id: sessionId },
+      })
+      if (!heartbeat.response.ok) {
+        throw new Error(heartbeat.data.error ?? `Heartbeat failed (${heartbeat.response.status})`)
+      }
+      return heartbeat.data
+    },
+    async disconnect() {
+      const latestConfig = await loadConfig()
+      await disconnectRepoSession({
+        config: latestConfig,
+        apiUrl,
+        token,
+        sessionId,
+        repoRoot: context.repoRoot,
+      })
+    },
+  }
 }
 
 async function commandTui() {
@@ -2086,6 +2555,31 @@ async function commandUi(args) {
     prepareLaunch: prepareManagedRepoLaunch,
   })
   const loadSnapshot = () => loadWorkspaceSnapshot({ supervisor })
+  const onboardingJobs = new Map()
+
+  const scheduleOnboarding = ({ workspaceRoot, repoId }) => {
+    if (onboardingJobs.has(repoId)) return onboardingJobs.get(repoId)
+
+    const job = runWorkspaceRepoOnboarding({ workspaceRoot, repoId })
+      .catch(async (err) => {
+        await markWorkspaceRepoOnboardingFailed({
+          workspaceRoot,
+          repoId,
+          error: err,
+        }).catch(() => {})
+        throw err
+      })
+      .finally(() => {
+        onboardingJobs.delete(repoId)
+      })
+
+    onboardingJobs.set(repoId, job)
+    job.catch((err) => {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.error(`HexGrid onboarding failed for ${repoId}: ${detail}`)
+    })
+    return job
+  }
 
   // Fail fast if no workspace is active, so the browser UI doesn't boot into a blank error state.
   await loadSnapshot()
@@ -2107,6 +2601,47 @@ async function commandUi(args) {
         rows: 40,
       }),
       stopRepo: async (repoId) => supervisor.stopSession(repoId),
+      pickPath: async (kind) => {
+        const sourceKind = normaliseSourceKind(kind)
+        const sourcePath = choosePathViaNativePicker(sourceKind)
+        return {
+          source_kind: sourceKind,
+          source_path: sourcePath,
+          path: resolveHexPathFromSelection(sourcePath, sourceKind),
+          suggested_repo_id: suggestRepoIdFromPath(sourcePath, sourceKind),
+        }
+      },
+      addRepo: async (input) => {
+        const created = await createWorkspaceRepoFromSelection({
+          repoId: input.repo_id,
+          sourcePath: input.source_path,
+          sourceKind: input.source_kind,
+          description: input.description ?? null,
+          defaultRuntime: input.runtime ?? 'codex',
+          listen: 'manual',
+        })
+        scheduleOnboarding({
+          workspaceRoot: created.workspace_root,
+          repoId: created.repo_id,
+        })
+        return created
+      },
+      removeRepo: async (repoId) => {
+        if (onboardingJobs.has(repoId)) {
+          throw new Error(`Repo "${repoId}" is still onboarding. Wait for onboarding to finish before removing it.`)
+        }
+
+        const session = supervisor.getSession(repoId)
+        if (session && ['starting', 'running', 'stopping'].includes(session.status)) {
+          await supervisor.stopSession(repoId)
+        }
+
+        const snapshot = await loadSnapshot()
+        return removeWorkspaceRepoById({
+          workspaceRoot: snapshot.workspace_root,
+          repoId,
+        })
+      },
       supervisor,
     })
 
@@ -2215,6 +2750,19 @@ async function commandRepo(args) {
     return
   }
 
+  if (subcommand === 'remove') {
+    const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
+    const config = await loadConfig()
+    const workspace = await resolveActiveWorkspace(config)
+    const result = await removeWorkspaceRepoById({
+      workspaceRoot: workspace.workspaceRoot,
+      repoId,
+    })
+
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+
   if (subcommand === 'run') {
     const repoId = validateRepoId(requireLeadingPositional(subArgs, 'repo id'))
     const repoArgs = subArgs.slice(1)
@@ -2222,6 +2770,7 @@ async function commandRepo(args) {
     const workspace = await resolveActiveWorkspace(config)
     const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
     const repoPath = typeof binding?.path === 'string' ? binding.path : null
+    assertWorkspaceRepoReadyForLaunch(repoId, binding)
     if (!repoPath) {
       throw new Error(`Repo "${repoId}" has no local path binding. Re-run \`hexgrid repo add ${repoId} --path ...\`.`)
     }
@@ -2242,7 +2791,11 @@ async function commandRepo(args) {
       ...(passthrough.length > 0 ? ['--', ...passthrough] : []),
     ]
 
-    await withWorkingDirectory(repoPath, () => commandRun(forwardedArgs))
+    await commandRun(forwardedArgs, {
+      startDir: repoPath,
+      exactPath: true,
+      sourceFilePath: binding?.seed_file ?? null,
+    })
     return
   }
 
@@ -2253,6 +2806,7 @@ async function commandRepo(args) {
     const workspace = await resolveActiveWorkspace(config)
     const binding = getWorkspaceRepoBinding(config, workspace.workspaceRoot, repoId)
     const repoPath = typeof binding?.path === 'string' ? binding.path : null
+    assertWorkspaceRepoReadyForLaunch(repoId, binding)
     if (!repoPath) {
       throw new Error(`Repo "${repoId}" has no local path binding. Re-run \`hexgrid repo add ${repoId} --path ...\`.`)
     }
@@ -2265,11 +2819,15 @@ async function commandRepo(args) {
       throw new Error('Repo listeners currently support only `claude`.')
     }
 
-    await withWorkingDirectory(repoPath, () => commandListen(stripFlagWithValue(repoArgs, '--runtime')))
+    await commandListen(stripFlagWithValue(repoArgs, '--runtime'), {
+      startDir: repoPath,
+      exactPath: true,
+      sourceFilePath: binding?.seed_file ?? null,
+    })
     return
   }
 
-  throw new Error(`Unsupported repo command "${subcommand}". Use add, list, run, or listen.`)
+  throw new Error(`Unsupported repo command "${subcommand}". Use add, list, remove, run, or listen.`)
 }
 
 async function commandLogin(args) {
@@ -2585,90 +3143,27 @@ async function commandOnboard(args) {
   await assertApiHealthy(apiUrl)
 
   const context = await detectRepoContext()
-  const name = parseFlag(args, '--name', `${context.repoName}-onboard`)
-  const description = parseFlag(
-    args,
-    '--description',
-    `onboarding session for ${context.repoName}`,
-  )
-
-  const connected = await connectRepoSession({
+  await ensureHexgridProjectGuide(context.repoRoot, {
+    repoName: context.repoName,
+    sourceFilePath: context.sourceFilePath,
+  })
+  const result = await runOnboardingSession({
     config,
     apiUrl,
     token,
     context,
-    runtime: 'onboard',
-    name,
-    description,
+    name: parseFlag(args, '--name', `${context.repoName}-onboard`),
+    description: parseFlag(
+      args,
+      '--description',
+      `onboarding session for ${context.repoName}`,
+    ),
   })
 
-  const sessionId = connected.session_id
-
-  try {
-    const { analysis, notes } = await generateOnboardingNotes(context)
-    const created = []
-    const capability = `repo:${context.repoName}`
-
-    for (const note of notes) {
-      const result = await writeKnowledgeNote(apiUrl, token, {
-        session_id: sessionId,
-        repo_url: context.repoUrl,
-        topic: note.topic,
-        content: note.content,
-        tags: note.tags,
-        kind: note.kind,
-        status: note.status,
-        confidence: note.confidence,
-        freshness: note.freshness,
-        source_refs: note.source_refs,
-        capability,
-      })
-
-      created.push({
-        id: result.id,
-        topic: result.topic,
-        kind: result.kind,
-        status: result.status,
-      })
-    }
-
-    console.log(JSON.stringify({
-      ok: true,
-      repo: context.repoName,
-      repo_url: context.repoUrl,
-      session_id: sessionId,
-      capability,
-      created,
-      needs_review: created.filter(note => note.status !== 'canonical').map(note => note.topic),
-      summary: {
-        repo_type: context.repoType,
-        units: analysis.units.map(unit => ({
-          path: unit.path,
-          ecosystem: unit.ecosystem,
-          frameworks: unit.frameworks,
-        })),
-        package_managers: analysis.packageManagers,
-        languages: analysis.languages,
-      },
-    }, null, 2))
-  } finally {
-    try {
-      const latestConfig = await loadConfig()
-      await disconnectRepoSession({
-        config: latestConfig,
-        apiUrl,
-        token,
-        sessionId,
-        repoRoot: context.repoRoot,
-      })
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
-      console.error(`Warning: failed to disconnect onboarding session ${sessionId} (${detail})`)
-    }
-  }
+  console.log(JSON.stringify(result, null, 2))
 }
 
-async function commandRun(args) {
+async function commandRun(args, options = {}) {
   const { primary, passthrough } = splitPassthroughArgs(args)
   const runtime = parseRuntime(firstPositional(primary), { allowAll: false })
   if (!runtime) {
@@ -2681,7 +3176,10 @@ async function commandRun(args) {
   await assertLoggedIn(apiUrl, token)
   await assertApiHealthy(apiUrl)
 
-  const context = await detectRepoContext()
+  const context = await detectRepoContext(options.startDir ?? process.cwd(), {
+    exactPath: options.exactPath ?? false,
+    sourceFilePath: options.sourceFilePath ?? null,
+  })
   await setupRuntimes({
     runtimes: [runtime],
     repoRoot: context.repoRoot,
@@ -3038,7 +3536,7 @@ function invokeClaudeHeadless(question, repoRoot) {
 
 const DEFAULT_POLL_SECONDS = 10
 
-async function commandListen(args) {
+async function commandListen(args, options = {}) {
   const config = await loadConfig()
   const apiUrl = resolveApiUrl(args, config)
   const token = resolveToken(config)
@@ -3047,7 +3545,10 @@ async function commandListen(args) {
   await assertLoggedIn(apiUrl, token)
   await assertApiHealthy(apiUrl)
 
-  const context = await detectRepoContext()
+  const context = await detectRepoContext(options.startDir ?? process.cwd(), {
+    exactPath: options.exactPath ?? false,
+    sourceFilePath: options.sourceFilePath ?? null,
+  })
   const capability = parseFlag(args, '--capability', `repo:${context.repoName}`)
   const name = parseFlag(args, '--name', `${context.repoName}-listener`)
   const pollSeconds = parsePositiveInt(parseFlag(args, '--poll-seconds', null), DEFAULT_POLL_SECONDS)

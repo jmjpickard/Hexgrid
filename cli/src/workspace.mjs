@@ -27,6 +27,48 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+function normaliseOnboardingState(onboarding) {
+  if (!isPlainObject(onboarding)) return null
+
+  const next = {}
+  const status = typeof onboarding.status === 'string' ? onboarding.status.trim().toLowerCase() : ''
+  if (status) next.status = status
+
+  for (const key of ['started_at', 'completed_at', 'updated_at']) {
+    if (Number.isInteger(onboarding[key])) next[key] = onboarding[key]
+  }
+
+  if (typeof onboarding.error === 'string' && onboarding.error.trim()) {
+    next.error = onboarding.error.trim()
+  }
+
+  return Object.keys(next).length > 0 ? next : null
+}
+
+function normaliseWorkspaceRepoBindingRecord(input) {
+  if (typeof input === 'string' && input.trim()) {
+    return { path: path.resolve(input.trim()) }
+  }
+
+  if (!isPlainObject(input)) return {}
+
+  const next = {}
+  for (const key of ['path', 'source_path', 'seed_file']) {
+    if (typeof input[key] === 'string' && input[key].trim()) {
+      next[key] = path.resolve(input[key].trim())
+    }
+  }
+
+  if (typeof input.source_kind === 'string' && input.source_kind.trim()) {
+    next.source_kind = input.source_kind.trim().toLowerCase()
+  }
+
+  const onboarding = normaliseOnboardingState(input.onboarding)
+  if (onboarding) next.onboarding = onboarding
+
+  return next
+}
+
 function normaliseRepoRecord(repo) {
   if (!isPlainObject(repo)) return {}
 
@@ -164,7 +206,13 @@ export async function saveWorkspaceManifest(workspaceRoot, manifest) {
 export function ensureWorkspaceState(config, workspaceRoot, workspaceName = null) {
   const workspaces = isPlainObject(config?.workspaces) ? { ...config.workspaces } : {}
   const existing = isPlainObject(workspaces[workspaceRoot]) ? workspaces[workspaceRoot] : {}
-  const repos = isPlainObject(existing.repos) ? { ...existing.repos } : {}
+  const repos = isPlainObject(existing.repos)
+    ? Object.fromEntries(
+        Object.entries(existing.repos)
+          .filter(([, repo]) => isPlainObject(repo))
+          .map(([repoId, repo]) => [repoId, normaliseWorkspaceRepoBindingRecord(repo)]),
+      )
+    : {}
 
   workspaces[workspaceRoot] = {
     ...existing,
@@ -193,14 +241,15 @@ export function getWorkspaceState(config, workspaceRoot) {
   }
 }
 
-export function upsertWorkspaceRepoBinding(config, workspaceRoot, workspaceName, repoId, repoPath) {
+export function upsertWorkspaceRepoBinding(config, workspaceRoot, workspaceName, repoId, repoBinding) {
   const next = ensureWorkspaceState(config, workspaceRoot, workspaceName)
   const currentWorkspace = next.workspaces[workspaceRoot]
   const currentRepo = isPlainObject(currentWorkspace.repos[repoId]) ? currentWorkspace.repos[repoId] : {}
+  const normalisedBinding = normaliseWorkspaceRepoBindingRecord(repoBinding)
 
   currentWorkspace.repos[repoId] = {
     ...currentRepo,
-    path: path.resolve(repoPath),
+    ...normalisedBinding,
   }
 
   return next
@@ -210,7 +259,16 @@ export function getWorkspaceRepoBinding(config, workspaceRoot, repoId) {
   const state = getWorkspaceState(config, workspaceRoot)
   const repo = state.repos[repoId]
   if (!isPlainObject(repo)) return null
-  return repo
+  return normaliseWorkspaceRepoBindingRecord(repo)
+}
+
+export function removeWorkspaceRepoBinding(config, workspaceRoot, workspaceName, repoId) {
+  const next = ensureWorkspaceState(config, workspaceRoot, workspaceName)
+  const currentWorkspace = next.workspaces[workspaceRoot]
+  if (isPlainObject(currentWorkspace.repos)) {
+    delete currentWorkspace.repos[repoId]
+  }
+  return next
 }
 
 export function getCurrentWorkspaceRoot(config) {
@@ -244,5 +302,11 @@ export function upsertWorkspaceRepo(manifest, repoId, repoData) {
     ...(isPlainObject(next.repos[repoId]) ? next.repos[repoId] : {}),
     ...normaliseRepoRecord(repoData),
   }
+  return next
+}
+
+export function removeWorkspaceRepo(manifest, repoId) {
+  const next = normaliseManifest(manifest, manifest?.name ?? 'workspace')
+  delete next.repos[repoId]
   return next
 }
