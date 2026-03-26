@@ -21,7 +21,6 @@ import {
   upsertWorkspaceRepoBinding,
 } from '../src/workspace.mjs'
 import { runWorkspaceTui } from '../src/tui.mjs'
-import { createSessionSupervisor } from '../src/session-supervisor.mjs'
 import { startLocalUiServer } from '../src/ui-server.mjs'
 
 const DEFAULT_API_URL = process.env.HEXGRID_API_URL ?? 'https://api.hexgrid.app'
@@ -2037,6 +2036,7 @@ async function prepareManagedRepoLaunch({ repoId, runtime }) {
 }
 
 async function commandTui() {
+  const { createSessionSupervisor } = await import('../src/session-supervisor.mjs')
   const supervisor = createSessionSupervisor({
     prepareLaunch: prepareManagedRepoLaunch,
   })
@@ -2066,6 +2066,7 @@ async function commandUi(args) {
     throw new Error('Invalid port. Use `hexgrid ui --port <0-65535>`.')
   }
 
+  const { createSessionSupervisor } = await import('../src/session-supervisor.mjs')
   const supervisor = createSessionSupervisor({
     prepareLaunch: prepareManagedRepoLaunch,
   })

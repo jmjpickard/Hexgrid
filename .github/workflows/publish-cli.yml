@@ -24,6 +24,9 @@ jobs:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
 
+      - name: Install CLI dependencies
+        run: npm ci --prefix cli
+
       - name: Verify CLI starts
         run: npm run --prefix cli check
 
