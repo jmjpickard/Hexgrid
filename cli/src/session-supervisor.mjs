@@ -5,6 +5,7 @@ const require = createRequire(import.meta.url)
 const pty = require('node-pty')
 
 const PREVIEW_BUFFER_LIMIT = 200
+const RAW_OUTPUT_LIMIT = 256 * 1024
 const STOP_GRACE_MS = 3_000
 const FORCE_KILL_MS = 6_000
 const DETACH_BYTE = 0x1d
@@ -38,6 +39,16 @@ function appendOutput(session, chunk) {
   if (session.buffer.length > PREVIEW_BUFFER_LIMIT) {
     session.buffer.splice(0, session.buffer.length - PREVIEW_BUFFER_LIMIT)
   }
+}
+
+function appendRawOutput(session, chunk) {
+  const text = String(chunk ?? '')
+  if (!text) return
+
+  const next = `${session.raw_output}${text}`
+  session.raw_output = next.length > RAW_OUTPUT_LIMIT
+    ? next.slice(next.length - RAW_OUTPUT_LIMIT)
+    : next
 }
 
 function toPublicSession(session) {
@@ -194,6 +205,7 @@ export function createSessionSupervisor({ prepareLaunch }) {
       error: null,
       buffer: [],
       partial_output: '',
+      raw_output: '',
       finalized: false,
       heartbeat_timer: null,
       resolve_exit: null,
@@ -244,6 +256,7 @@ export function createSessionSupervisor({ prepareLaunch }) {
 
       ptyProcess.onData((chunk) => {
         session.last_output_at = nowSeconds()
+        appendRawOutput(session, chunk)
         appendOutput(session, chunk)
 
         if (attachedContext?.session?.repo_id === repoId) {
@@ -401,6 +414,33 @@ export function createSessionSupervisor({ prepareLaunch }) {
     }
   }
 
+  const resizeSession = (repoId, cols, rows) => {
+    const session = sessions.get(repoId)
+    if (!session || !session.pty || session.status !== 'running') {
+      throw new Error(`Repo "${repoId}" does not have a running managed session.`)
+    }
+
+    const nextCols = Math.max(2, Number(cols) || 120)
+    const nextRows = Math.max(1, Number(rows) || 40)
+    session.pty.resize(nextCols, nextRows)
+    return toPublicSession(session)
+  }
+
+  const writeInput = (repoId, data) => {
+    const session = sessions.get(repoId)
+    if (!session || !session.pty || session.status !== 'running') {
+      throw new Error(`Repo "${repoId}" does not have a running managed session.`)
+    }
+
+    session.pty.write(String(data ?? ''))
+    return toPublicSession(session)
+  }
+
+  const getRawOutput = (repoId) => {
+    const session = sessions.get(repoId)
+    return session?.raw_output ?? ''
+  }
+
   const subscribe = (listener) => {
     listeners.add(listener)
     return () => listeners.delete(listener)
@@ -420,6 +460,9 @@ export function createSessionSupervisor({ prepareLaunch }) {
     attach,
     detach,
     resize,
+    resizeSession,
+    writeInput,
+    getRawOutput,
     subscribe,
     shutdown,
   }

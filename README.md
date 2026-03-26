@@ -199,6 +199,9 @@ hexgrid run codex
 # or
 hexgrid run claude
 
+# or open the localhost browser UI for the current workspace
+hexgrid ui
+
 # list sessions and talk to another hex (CLI wrappers)
 hexgrid sessions
 hexgrid ask --to "<session_id|name|hex_id>" --question "Need eyes on auth flow"

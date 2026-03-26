@@ -19,6 +19,7 @@ hexgrid repo add api
 hexgrid repo add api --path ~/src/api-service --runtime codex --listen manual
 hexgrid repo list
 hexgrid
+hexgrid ui
 hexgrid repo run api --runtime codex
 hexgrid repo listen api
 
@@ -51,6 +52,10 @@ CLI will prompt for the remaining fields, with the current repo path detected by
 
 `hexgrid` with no arguments now opens the active workspace TUI in an interactive terminal.
 If stdout is not a TTY, it falls back to the JSON workspace summary.
+
+`hexgrid ui` starts a localhost browser UI for the current workspace. The browser surface is
+local-only: HexGrid still uses the remote API for auth, heartbeat, inbox, and knowledge, but
+interactive Claude/Codex terminals stay on your machine and stream over a localhost connection.
 
 ## TUI controls
 
@@ -89,8 +94,9 @@ If stdout is not a TTY, it falls back to the JSON workspace summary.
 3. `hexgrid login` once per machine.
 4. In each repo, run `hexgrid onboard` once to publish a first-pass repo dossier.
 5. Use `hexgrid` to inspect the current workspace from anywhere.
-6. Start a live session with `hexgrid repo run <repo>` or from inside a repo with `hexgrid run codex|claude`.
-7. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
+6. Use `hexgrid ui` if you want the workspace in a browser-backed localhost control plane.
+7. Start a live session with `hexgrid repo run <repo>` or from inside a repo with `hexgrid run codex|claude`.
+8. CLI auto-configures MCP, connects session, keeps heartbeat alive, and disconnects on exit.
 
 ## Update CLI
 

@@ -22,6 +22,7 @@ import {
 } from '../src/workspace.mjs'
 import { runWorkspaceTui } from '../src/tui.mjs'
 import { createSessionSupervisor } from '../src/session-supervisor.mjs'
+import { startLocalUiServer } from '../src/ui-server.mjs'
 
 const DEFAULT_API_URL = process.env.HEXGRID_API_URL ?? 'https://api.hexgrid.app'
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'hexgrid', 'config.json')
@@ -57,6 +58,7 @@ function usage() {
 Usage:
   hexgrid
   hexgrid tui
+  hexgrid ui [--port PORT] [--no-open]
   hexgrid workspace [status]
   hexgrid workspace init [--name NAME]
   hexgrid repo add <repo_id> [--path PATH] [--remote URL] [--description TEXT] [--runtime RUNTIME] [--listen MODE]
@@ -2057,6 +2059,75 @@ async function commandTui() {
   }
 }
 
+async function commandUi(args) {
+  const requestedPort = parseFlag(args, '--port', null)
+  const parsedPort = requestedPort == null ? 4681 : Number.parseInt(String(requestedPort), 10)
+  if (!Number.isInteger(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
+    throw new Error('Invalid port. Use `hexgrid ui --port <0-65535>`.')
+  }
+
+  const supervisor = createSessionSupervisor({
+    prepareLaunch: prepareManagedRepoLaunch,
+  })
+  const loadSnapshot = () => loadWorkspaceSnapshot({ supervisor })
+
+  // Fail fast if no workspace is active, so the browser UI doesn't boot into a blank error state.
+  await loadSnapshot()
+
+  let localUi = null
+  let shuttingDown = false
+  const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
+    if (localUi) await localUi.close()
+  }
+
+  try {
+    localUi = await startLocalUiServer({
+      port: parsedPort,
+      loadSnapshot,
+      startRepo: async (repoId, runtime) => supervisor.startSession(repoId, runtime, {
+        cols: 120,
+        rows: 40,
+      }),
+      stopRepo: async (repoId) => supervisor.stopSession(repoId),
+      supervisor,
+    })
+
+    const shouldOpen = !hasFlag(args, '--no-open')
+    const opened = shouldOpen ? openBrowser(localUi.auth_url) : false
+
+    console.log(`HexGrid Local UI: ${localUi.auth_url}`)
+    if (shouldOpen && opened) {
+      console.log('Opened browser for local UI.')
+    } else if (shouldOpen) {
+      console.log('Browser did not open automatically. Use the URL above.')
+    }
+    console.log('Press Ctrl+C to stop the local UI and managed sessions.')
+
+    const handleSignal = () => {
+      shutdown().catch(() => {})
+    }
+
+    process.on('SIGINT', handleSignal)
+    process.on('SIGTERM', handleSignal)
+
+    try {
+      await localUi.waitUntilClosed()
+    } finally {
+      process.removeListener('SIGINT', handleSignal)
+      process.removeListener('SIGTERM', handleSignal)
+    }
+  } finally {
+    try {
+      await localUi?.close()
+    } catch {
+      // Best-effort shutdown.
+    }
+    await supervisor.shutdown()
+  }
+}
+
 async function commandRepo(args) {
   const subcommand = requireLeadingPositional(args, 'repo command')
   const subArgs = args.slice(1)
@@ -3259,6 +3330,10 @@ async function main() {
   }
   if (command === 'tui') {
     await commandTui()
+    return
+  }
+  if (command === 'ui') {
+    await commandUi(args)
     return
   }
   if (command === 'repo') {
