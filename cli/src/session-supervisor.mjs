@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import process from 'node:process'
 import { createRequire } from 'node:module'
 
@@ -9,6 +11,90 @@ const RAW_OUTPUT_LIMIT = 256 * 1024
 const STOP_GRACE_MS = 3_000
 const FORCE_KILL_MS = 6_000
 const DETACH_BYTE = 0x1d
+
+function formatMode(mode) {
+  if (!Number.isInteger(mode)) return null
+  return `0${mode.toString(8)}`
+}
+
+function resolveNodePtyHelperPath() {
+  if (process.platform !== 'darwin') return null
+
+  try {
+    const { loadNativeModule } = require('node-pty/lib/utils')
+    const native = loadNativeModule('pty')
+    const unixTerminalPath = require.resolve('node-pty/lib/unixTerminal.js')
+    return path.resolve(path.dirname(unixTerminalPath), native.dir, 'spawn-helper')
+      .replace('app.asar', 'app.asar.unpacked')
+      .replace('node_modules.asar', 'node_modules.asar.unpacked')
+  } catch {
+    return null
+  }
+}
+
+function ensureNodePtyHelperExecutable() {
+  const helperPath = resolveNodePtyHelperPath()
+  if (!helperPath) {
+    return {
+      helper_path: null,
+      helper_mode: null,
+      repaired: false,
+      error: null,
+    }
+  }
+
+  try {
+    const before = fs.statSync(helperPath).mode & 0o777
+    if ((before & 0o111) !== 0) {
+      return {
+        helper_path: helperPath,
+        helper_mode: before,
+        repaired: false,
+        error: null,
+      }
+    }
+
+    fs.chmodSync(helperPath, before | 0o111)
+    const after = fs.statSync(helperPath).mode & 0o777
+    return {
+      helper_path: helperPath,
+      helper_mode: after,
+      repaired: true,
+      error: null,
+    }
+  } catch (error) {
+    const statError = (() => {
+      try {
+        return fs.statSync(helperPath)
+      } catch {
+        return null
+      }
+    })()
+
+    return {
+      helper_path: helperPath,
+      helper_mode: statError ? statError.mode & 0o777 : null,
+      repaired: false,
+      error,
+    }
+  }
+}
+
+function describeNodePtyHelper(state) {
+  if (!state?.helper_path) return null
+
+  const parts = [`node-pty helper=${state.helper_path}`]
+  const mode = formatMode(state.helper_mode)
+  if (mode) parts.push(`mode=${mode}`)
+  if (state.repaired) parts.push('repaired=true')
+  if (state.error) {
+    const detail = state.error instanceof Error ? state.error.message : String(state.error)
+    parts.push(`repair_error=${detail}`)
+  }
+  return parts.join('; ')
+}
+
+const NODE_PTY_HELPER_STATE = ensureNodePtyHelperExecutable()
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000)
@@ -274,7 +360,12 @@ export function createSessionSupervisor({ prepareLaunch }) {
       return toPublicSession(session)
     } catch (err) {
       const baseDetail = err instanceof Error ? err.message : String(err)
-      const detail = `${baseDetail} (command: ${launch.command}; cwd: ${launch.cwd})`
+      const helperDetail = baseDetail.includes('posix_spawnp failed')
+        ? describeNodePtyHelper(NODE_PTY_HELPER_STATE)
+        : null
+      const detail = helperDetail
+        ? `${baseDetail} (${helperDetail}; command: ${launch.command}; cwd: ${launch.cwd})`
+        : `${baseDetail} (command: ${launch.command}; cwd: ${launch.cwd})`
       session.status = 'errored'
       session.error = detail
       session.exited_at = nowSeconds()
