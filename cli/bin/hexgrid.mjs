@@ -237,6 +237,10 @@ function formatBulletList(items, fallback = '- none detected') {
   return items.length > 0 ? items.map(item => `- ${item}`).join('\n') : fallback
 }
 
+function shellEscape(input) {
+  return `'${String(input ?? '').replace(/'/g, `'\\''`)}'`
+}
+
 function truncateText(input, max = 4000) {
   if (!input || input.length <= max) return input
   return `${input.slice(0, Math.max(0, max - 3))}...`
@@ -1972,11 +1976,15 @@ async function prepareManagedRepoLaunch({ repoId, runtime }) {
     throw new Error(`Runtime "${runtimeCommand}" was not found in PATH.`)
   }
   const nodeCommandPath = resolveCommandPath('node') ?? process.execPath
+  const shellPath = typeof process.env.SHELL === 'string' && path.isAbsolute(process.env.SHELL)
+    ? process.env.SHELL
+    : '/bin/sh'
   const launchPath = uniq([
     path.dirname(commandPath),
     nodeCommandPath ? path.dirname(nodeCommandPath) : null,
     process.env.PATH,
   ]).join(path.delimiter)
+  const shellCommand = `exec ${shellEscape(commandPath)}`
 
   return withWorkingDirectory(repoPath, async () => {
     const context = await detectRepoContext()
@@ -2003,8 +2011,8 @@ async function prepareManagedRepoLaunch({ repoId, runtime }) {
     return {
       repo_id: repoId,
       runtime: selectedRuntime,
-      command: commandPath,
-      args: [],
+      command: shellPath,
+      args: ['-lc', shellCommand],
       cwd: context.repoRoot,
       env: {
         ...process.env,

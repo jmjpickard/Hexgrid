@@ -273,7 +273,8 @@ export function createSessionSupervisor({ prepareLaunch }) {
       emit({ type: 'session-started', repoId, pid: session.pid })
       return toPublicSession(session)
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
+      const baseDetail = err instanceof Error ? err.message : String(err)
+      const detail = `${baseDetail} (command: ${launch.command}; cwd: ${launch.cwd})`
       session.status = 'errored'
       session.error = detail
       session.exited_at = nowSeconds()
