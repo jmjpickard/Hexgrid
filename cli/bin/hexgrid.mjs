@@ -1971,6 +1971,12 @@ async function prepareManagedRepoLaunch({ repoId, runtime }) {
   if (!commandPath) {
     throw new Error(`Runtime "${runtimeCommand}" was not found in PATH.`)
   }
+  const nodeCommandPath = resolveCommandPath('node') ?? process.execPath
+  const launchPath = uniq([
+    path.dirname(commandPath),
+    nodeCommandPath ? path.dirname(nodeCommandPath) : null,
+    process.env.PATH,
+  ]).join(path.delimiter)
 
   return withWorkingDirectory(repoPath, async () => {
     const context = await detectRepoContext()
@@ -2002,6 +2008,7 @@ async function prepareManagedRepoLaunch({ repoId, runtime }) {
       cwd: context.repoRoot,
       env: {
         ...process.env,
+        PATH: launchPath,
         HEXGRID_API_KEY: token,
         HEXGRID_API_URL: apiUrl,
         HEXGRID_SESSION_ID: sessionId,

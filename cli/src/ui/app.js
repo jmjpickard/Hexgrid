@@ -431,7 +431,15 @@
       })
       await loadSnapshot()
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err))
+      const detail = err instanceof Error ? err.message : String(err)
+      setStatus(`Failed to start ${repoId}: ${detail}`)
+      if (repoId === state.selectedRepoId) {
+        showTerminalMessage([
+          `Failed to start ${repoId} with ${runtime}.`,
+          '',
+          detail,
+        ])
+      }
     }
   }
 
